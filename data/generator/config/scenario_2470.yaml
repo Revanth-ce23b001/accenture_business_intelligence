@@ -1,0 +1,36 @@
+# Case #2470 — West, net revenue, 12 Nov 2025 (DAILY) -> Gate 1 kill
+#
+# A data incident, not a case. 25 of 140 West store feeds fail to load for
+# this single day, so the headline shows -18.0% that never happened.
+#
+# OVERLAP NOTE: this day sits inside #2451's month. CLAUDE.md calls the
+# scenarios non-overlapping and then says #2470 is "a daily check inside
+# #2451's month". Both cannot be true. The generator resolves it the only
+# way that keeps #2451's monthly reconciliation intact: the FEED is
+# broken, the underlying sales are not. sales_daily carries the true
+# value; the incident lives in a separate feed_status table, so the
+# monthly rollup is unaffected and 12 Nov is recoverable on reload.
+
+case_id: "2470"
+scope: West
+kpi: net_revenue
+grain: daily
+period: "2025-11-12"
+
+targets:
+  failed_store_feeds: 25
+  total_west_stores: 140
+  apparent_movement_pct: -18.0
+
+gate:
+  gate_id: 1
+  outcome_code: DATA_INCIDENT
+  case_opened: false
+
+incident:
+  # The failed feeds are chosen to carry 18.0% of West daily revenue,
+  # which 25 average stores would not (25/140 = 17.9%). Selection is
+  # deterministic under the seed and recorded in feed_status.csv.
+  target_revenue_share: 0.180
+  affects_underlying_sales: false
+  recoverable_on_reload: true

@@ -1,0 +1,270 @@
+# Causal graph — the hypothesis templates the adjudicator draws from.
+#
+# HOW T3 BECOMES DETERMINISTIC
+#
+# Every source the organisation could reference is declared once in
+# `sources` below, each with `held: true|false`. A template's
+# `required_sources` is what the hypothesis needs in order to be testable;
+# `available_sources` is what can actually be fetched for it.
+#
+#   missing = required_sources - available_sources
+#
+# If the leading hypothesis has a non-empty `missing`, trigger T3 fires.
+# No model is asked whether a source exists — it is a set difference over
+# this file. `competitor_action` is the worked example: it needs pricing
+# and footfall, the organisation holds neither, and only news is
+# available.
+#
+# PRIORS ARE NOT A PARTITION
+#
+# `prior` is the standalone prior probability that this driver explains a
+# material movement of the KPIs it affects. Several hypotheses can be true
+# at once, so these do not and should not sum to 1.0.
+#
+# CONFOUNDERS
+#
+# `confounders` lists the other templates that could produce the same
+# signature. Test 6 (confounder screen) reads this list — that is what
+# CLAUDE.md means by "test known confounders from the causal graph". A
+# hypothesis with an empty confounder list asserts that nothing else in
+# this graph mimics it, which is a strong claim; justify it in the
+# description.
+
+version: 1
+
+# --------------------------------------------------------------------------
+# Source registry. `held: false` means the organisation does not have it.
+# --------------------------------------------------------------------------
+sources:
+  pos:                  { held: true,  reliability_tier: structured_query,          description: "Point-of-sale transaction log" }
+  erp:                  { held: true,  reliability_tier: structured_query,          description: "Store, SKU and org master data" }
+  wms:                  { held: true,  reliability_tier: structured_query,          description: "Inventory snapshots" }
+  footfall:             { held: true,  reliability_tier: structured_query,          description: "Door-sensor counters, partial estate coverage" }
+  pricing:              { held: true,  reliability_tier: structured_query,          description: "Price-change log" }
+  returns:              { held: true,  reliability_tier: structured_query,          description: "Returns and refunds ledger" }
+  qcomm_oms:            { held: true,  reliability_tier: structured_query,          description: "Quick-commerce order management" }
+  promo_calendar:       { held: true,  reliability_tier: structured_query,          description: "Planned promotion windows" }
+  marketing_spend:      { held: true,  reliability_tier: structured_query,          description: "Media and trade spend by region and week" }
+  staffing_roster:      { held: true,  reliability_tier: structured_query,          description: "Planned and actual shift coverage" }
+  logistics_tms:        { held: true,  reliability_tier: structured_query,          description: "Transport management, dispatch and delivery events" }
+  assortment_master:    { held: true,  reliability_tier: structured_query,          description: "Ranged assortment by store and period" }
+  weather_feed:         { held: true,  reliability_tier: structured_query,          description: "Daily weather by city" }
+  support_tickets:      { held: true,  reliability_tier: ticket_aggregate,          description: "Customer support ticket aggregates" }
+  store_notes:          { held: true,  reliability_tier: store_note,                description: "Free-text shift notes filed by store staff" }
+  competitor_news:      { held: true,  reliability_tier: news_item,                 description: "External news mentions of competitor activity" }
+  review_feed:          { held: true,  reliability_tier: social_mention,            description: "Public review and social mentions" }
+  competitor_pricing:   { held: false, reliability_tier: structured_query,          description: "Competitor price feed. NOT HELD." }
+  competitor_footfall:  { held: false, reliability_tier: structured_query,          description: "Competitor catchment footfall. NOT HELD." }
+
+# --------------------------------------------------------------------------
+# Hypothesis templates
+# --------------------------------------------------------------------------
+hypotheses:
+
+  stock_out:
+    label: Stock-out on ranged SKUs
+    description: >
+      Ranged SKUs were unavailable on shelf, so demand that arrived could
+      not convert. Distinguished from assortment_change by the
+      denominator: a stock-out leaves the SKU ranged and empty, a
+      deranged SKU leaves the assortment entirely.
+    affects: [net_revenue, transactions, conversion_rate, on_shelf_availability]
+    required_sources: [wms, erp]
+    available_sources: [wms, erp, store_notes, support_tickets]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [assortment_change, transport_disruption, promo_lapse]
+    prior: 0.18
+
+  price_increase:
+    label: Price increase
+    description: >
+      A deliberate price rise suppressed volume. Tested against the
+      price-change log, never against unadjusted ASP movement, which
+      also moves with mix.
+    affects: [net_revenue, transactions, conversion_rate, avg_selling_price]
+    required_sources: [pricing, pos]
+    available_sources: [pricing, pos, erp]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [promo_lapse, mix_shift, competitor_action]
+    prior: 0.10
+
+  promo_lapse:
+    label: Promotion lapsed or was not renewed
+    description: >
+      A promotion that ran in the comparison period did not run in the
+      current one. Distinguished from price_increase by the price-change
+      log: a lapse has no price event, only a promotion-window boundary.
+    affects: [net_revenue, transactions, conversion_rate, avg_selling_price]
+    required_sources: [promo_calendar, marketing_spend]
+    available_sources: [promo_calendar, marketing_spend, pos]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [price_increase, calendar_shift, mix_shift]
+    prior: 0.08
+
+  competitor_action:
+    label: Competitor promotion or price action
+    description: >
+      A competitor ran a promotion or cut price and took share. This
+      hypothesis is structurally unverifiable at this organisation: the
+      two sources that would test it are not held, and news coverage
+      alone cannot establish dose or timing at store level.
+
+      Sufficiency and DiD are excluded rather than failed. Sufficiency
+      needs an observed elasticity against a competitor price series
+      that does not exist; DiD needs treated and untreated groups, and
+      without competitor footfall there is no way to say which stores
+      were exposed. Running either would manufacture a number from
+      absent data.
+    affects: [net_revenue, transactions, conversion_rate]
+    required_sources: [competitor_pricing, competitor_footfall]
+    available_sources: [competitor_news]
+    applicable_tests: [precedence, dose_response, specificity, confounder_screen]
+    confounders: [calendar_shift, weather, footfall_decline, promo_lapse]
+    prior: 0.10
+    calibration_note: "58% accurate on n=12 closed cases — below publication floor"
+
+  staffing_shortfall:
+    label: Staffing shortfall
+    description: >
+      Shifts ran below planned coverage, so customers who arrived were
+      not served. Shows in conversion before it shows in revenue.
+    affects: [conversion_rate, net_revenue, transactions]
+    required_sources: [staffing_roster]
+    available_sources: [staffing_roster, erp, store_notes]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [footfall_decline, calendar_shift, store_closure]
+    prior: 0.06
+
+  footfall_decline:
+    label: Catchment footfall decline
+    description: >
+      Fewer people entered the catchment. Note the direction: on
+      conversion_rate this moves the DENOMINATOR, so a footfall decline
+      raises conversion mechanically while depressing transactions. A
+      hypothesis that claims footfall explains a conversion FALL is
+      claiming something else and must say what.
+
+      Coverage is partial — only instrumented stores carry counters — so
+      dose-response and DiD run on a subset and their generalisation to
+      the full scope must be stated, not assumed.
+    affects: [transactions, net_revenue, conversion_rate]
+    required_sources: [footfall]
+    available_sources: [footfall, store_notes]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [weather, competitor_action, calendar_shift, store_closure, transport_disruption]
+    prior: 0.09
+
+  mix_shift:
+    label: Sales mix shift
+    description: >
+      What customers bought changed, moving blended ASP without any
+      price decision. Separated from price_increase by holding
+      sub-category mix constant.
+    affects: [avg_selling_price, net_revenue]
+    required_sources: [pos, erp]
+    available_sources: [pos, erp]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [assortment_change, promo_lapse, stock_out]
+    prior: 0.07
+
+  channel_cannibalisation:
+    label: Channel cannibalisation
+    description: >
+      Demand moved between store and quick-commerce rather than
+      disappearing. Confirmed only when the receiving channel shows the
+      matching gain in the same catchment and period.
+    affects: [net_revenue, transactions, conversion_rate, qcomm_fulfilment_rate]
+    required_sources: [pos, qcomm_oms]
+    available_sources: [pos, qcomm_oms, erp]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [assortment_change, price_increase, promo_lapse]
+    prior: 0.05
+
+  weather:
+    label: Adverse weather
+    description: >
+      Weather suppressed trips to the catchment. Short-lived by nature —
+      a weather hypothesis that requires a multi-week effect is almost
+      always a confounder for something else.
+    affects: [transactions, net_revenue, conversion_rate]
+    required_sources: [weather_feed]
+    available_sources: [weather_feed, store_notes]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [calendar_shift, transport_disruption, footfall_decline]
+    prior: 0.06
+
+  transport_disruption:
+    label: Transport or replenishment disruption
+    description: >
+      Dispatch or delivery failed, so replenishment did not reach store.
+      Upstream of stock_out — where both are live, transport_disruption
+      is the cause of the cause.
+    affects: [on_shelf_availability, net_revenue, qcomm_fulfilment_rate]
+    required_sources: [logistics_tms]
+    available_sources: [logistics_tms, store_notes, wms]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [weather, stock_out]
+    prior: 0.05
+
+  data_incident:
+    label: Data incident
+    description: >
+      The movement is in the data, not the business — feeds failed,
+      loaded late, or double-loaded.
+
+      This template normally never reaches adjudication: Gate 1 catches
+      it and kills the case before one is opened. It exists here so that
+      an incident surviving to adjudication can still be named rather
+      than silently attributed to a real driver. DiD and dose-response
+      are excluded because a missing feed has no dose and no valid
+      control.
+    affects: [net_revenue, transactions, conversion_rate, avg_selling_price, on_shelf_availability, qcomm_fulfilment_rate]
+    required_sources: [erp]
+    available_sources: [erp, pos, wms, qcomm_oms]
+    applicable_tests: [precedence, sufficiency, specificity, confounder_screen]
+    confounders: []
+    prior: 0.07
+    calibration_note: "Normally resolved at Gate 1; reaching adjudication is itself a finding"
+
+  calendar_shift:
+    label: Calendar or festival shift
+    description: >
+      A festival, holiday or payday moved between periods, so the
+      comparison is against a different calendar rather than a different
+      business.
+
+      DiD is excluded on principle: a calendar shift hits every store at
+      once, so no untreated control group exists. Constructing one would
+      require pretending some stores did not experience the festival.
+    affects: [net_revenue, transactions, conversion_rate, avg_selling_price]
+    required_sources: [erp]
+    available_sources: [erp, promo_calendar]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, confounder_screen]
+    confounders: [weather, promo_lapse]
+    prior: 0.09
+
+  store_closure:
+    label: Store closure or trading interruption
+    description: >
+      One or more stores did not trade for part of the period —
+      refurbishment, licence, civic action. Mechanical and easy to
+      confirm, which is why it is screened early.
+    affects: [net_revenue, transactions]
+    required_sources: [erp]
+    available_sources: [erp, store_notes, pos]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [transport_disruption, weather]
+    prior: 0.03
+
+  assortment_change:
+    label: Assortment change
+    description: >
+      SKUs were added to or removed from the ranged assortment, moving
+      the availability denominator and the mix. Distinguished from
+      stock_out by whether the SKU remained ranged.
+    affects: [on_shelf_availability, avg_selling_price, net_revenue]
+    required_sources: [assortment_master, erp]
+    available_sources: [assortment_master, erp, wms]
+    applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
+    confounders: [mix_shift, stock_out]
+    prior: 0.07

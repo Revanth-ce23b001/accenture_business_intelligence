@@ -1,0 +1,52 @@
+# CaseFile.ai — local stack.
+#
+# There is deliberately NO database service: the analytical store is DuckDB,
+# a single file at data/casefile.duckdb (CLAUDE.md §"Stack").
+#
+#   docker compose up            -> api only
+#   docker compose --profile frontend up  -> api + frontend (not before P9)
+#
+# The frontend sits behind a profile because CLAUDE.md rule 9 forbids starting
+# it until P9 is green; this keeps `docker compose up` working in the meantime.
+#
+# Both services run from stock images against a bind mount. Dedicated
+# Dockerfiles can replace them at P8/P9 without changing this file's shape.
+
+services:
+  api:
+    image: python:3.12-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install --no-cache-dir -e . &&
+             uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload"
+    environment:
+      # Offline by default — the demo must run with the network disabled.
+      MOCK_LLM: "${MOCK_LLM:-true}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      CASEFILE_DB: "/app/data/casefile.duckdb"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - .:/app
+      - pip-cache:/root/.cache/pip
+    ports:
+      - "8000:8000"
+
+  frontend:
+    profiles: ["frontend"]
+    image: node:22-alpine
+    working_dir: /app/frontend
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: "http://localhost:8000"
+      NODE_ENV: "development"
+    volumes:
+      - .:/app
+      - node-modules:/app/frontend/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pip-cache:
+  node-modules:

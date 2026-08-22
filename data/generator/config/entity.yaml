@@ -1,0 +1,153 @@
+# Meridian Footwear India — the entity being simulated.
+#
+# Every number here is a TARGET the generator aims at, not an output it
+# reports. CLAUDE.md rule 4: nothing on screen is a typed-in constant.
+#
+# NOTE ON REGIONAL DENSITY (reported, not invented):
+# CLAUDE.md gives annual net revenue ~₹3,400 Cr, West ~₹1,000 Cr over 140
+# stores, and East ₹34.5 Cr/month over 58 stores. That implies:
+#
+#   West  ₹1,004 Cr / 140 = ₹7.17 Cr per store per year
+#   East  ₹  414 Cr /  58 = ₹7.14 Cr per store per year
+#   N+S   ₹1,982 Cr / 214 = ₹9.26 Cr per store per year
+#
+# North and South stores must therefore be ~30% larger than West and East
+# stores for the ₹3,400 Cr total to hold. CLAUDE.md does not say this, so
+# it is encoded here explicitly rather than left as an accident of tuning.
+
+seed: 20260822
+
+timeline:
+  end_date: "2025-11-30"
+  months: 18
+  # Derived: start_date = end_date - 18 months + 1 day
+  current_period: "2025-11"
+
+regions:
+  North:
+    stores: 118
+    annual_net_revenue_inr_cr: 1093.0
+    cities: [Delhi, Jaipur, Lucknow, Chandigarh, Kanpur, Agra]
+  South:
+    stores: 96
+    annual_net_revenue_inr_cr: 889.0
+    cities: [Bengaluru, Chennai, Hyderabad, Kochi, Coimbatore]
+  East:
+    stores: 58
+    annual_net_revenue_inr_cr: 414.0
+    cities: [Kolkata, Bhubaneswar, Guwahati, Patna, Ranchi]
+  West:
+    stores: 140
+    annual_net_revenue_inr_cr: 1004.4
+    cities: [Mumbai, Pune, Ahmedabad, Surat, Nagpur, Nashik, Vadodara]
+
+total_stores: 412
+total_annual_net_revenue_inr_cr: 3400.4
+
+# --------------------------------------------------------------------------
+# Anchor: West monthly revenue in the comparison month. Everything in
+# case #2451 is derived from this.
+# --------------------------------------------------------------------------
+anchors:
+  west_net_revenue_oct_2025_inr_cr: 83.70
+  east_net_revenue_monthly_inr_cr: 34.5
+
+# --------------------------------------------------------------------------
+# Store size distribution. Lognormal within region, then rescaled so the
+# region hits its annual target exactly.
+# --------------------------------------------------------------------------
+store_size:
+  distribution: lognormal
+  sigma: 0.32
+  formats: [High Street, Mall, Factory Outlet]
+  format_weights: [0.46, 0.38, 0.16]
+  catchment_types: [Metro, Tier1, Tier2]
+  catchment_weights: [0.34, 0.40, 0.26]
+  sqft_mean: 1850
+  sqft_sigma: 420
+  staffing_per_1000_sqft: 2.6
+
+# --------------------------------------------------------------------------
+# Product catalogue. Deliberately small — the top-20 SKUs are what the
+# availability metric measures, and a 60-SKU catalogue keeps the inventory
+# snapshot table tractable at four snapshots a day.
+# --------------------------------------------------------------------------
+catalogue:
+  sku_count: 60
+  top_n: 20
+  categories: [Sports, Casual, Formal, Sandals, Kids]
+  category_weights: [0.32, 0.28, 0.16, 0.14, 0.10]
+  price_inr:
+    Sports: [2200, 5400]
+    Casual: [1400, 3600]
+    Formal: [2400, 6200]
+    Sandals: [700, 2100]
+    Kids: [600, 1800]
+  # Demand concentration across SKUs (Zipf-like). The top-20 carry most
+  # of the volume, which is why a stock-out on them bites.
+  demand_zipf_s: 0.85
+  units_per_bill_mean: 1.6
+
+# --------------------------------------------------------------------------
+# Baseline trade pattern.
+# --------------------------------------------------------------------------
+trade:
+  dow_multipliers:   # Mon..Sun
+    - 0.82
+    - 0.80
+    - 0.86
+    - 0.92
+    - 1.18
+    - 1.46
+    - 1.36
+  annual_growth: 0.06
+  daily_noise_sigma: 0.085
+  store_noise_sigma: 0.045
+  open_hour_ist: 10
+  close_hour_ist: 21
+
+# --------------------------------------------------------------------------
+# Netting. net = gross - returns - discount - tax.
+# --------------------------------------------------------------------------
+netting:
+  tax_rate: 0.12
+  discount_rate_mean: 0.085
+  discount_rate_sigma: 0.02
+  return_rate: 0.058
+  # DELIBERATE DEFECT: returns are restated up to 3 days after the
+  # original bill, so a naive same-day join understates returns.
+  return_lag_days_max: 3
+
+# --------------------------------------------------------------------------
+# DELIBERATE DEFECTS. Each exists so a downstream stage has something real
+# to catch. Removing one silently weakens a demo moment.
+# --------------------------------------------------------------------------
+defects:
+  b2b_share_of_gross: 0.043      # B2B bulk orders sit in the same table
+  transfer_share_of_rows: 0.021  # inter-store transfers, not sales
+  store_code_changes: 3          # three stores change store_code mid-period
+  store_code_change_window: ["2025-04-01", "2025-08-31"]
+
+# --------------------------------------------------------------------------
+# Footfall instrumentation. Partial by design — this is what makes #2467's
+# footfall hypothesis untestable at full scope.
+# --------------------------------------------------------------------------
+footfall:
+  west_stores_with_counters: 31   # of 140; the other 109 are null
+  other_region_coverage: 0.55
+  conversion_rate_base_pt: 22.0
+
+# --------------------------------------------------------------------------
+# Emission volume. Bill lines are the only table whose full grain is
+# infeasible: 412 stores x 548 days x ~70 bills x 1.6 lines is ~25M rows
+# and ~2 GB. The authoritative revenue tables are sales_daily and
+# sales_daily_sku; bill_lines carries the line-grain defects and is
+# deterministically sampled.
+# --------------------------------------------------------------------------
+emission:
+  bill_lines_sample_rate: 0.02
+  bill_lines_window_days: 275
+  inventory_snapshot_window_days: 90
+  sku_daily_window_days: 120
+  snapshot_hours_ist: [6, 12, 18, 23]
+  store_notes_per_week_national: 180

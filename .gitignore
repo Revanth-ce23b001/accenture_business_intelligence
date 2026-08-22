@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated warehouse and raw CSVs — rebuilt by `make seed`.
+data/*.duckdb
+data/*.duckdb.wal
+data/raw/*
+!data/raw/.gitkeep
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+
+# Secrets — never commit an API key.
+.env
+.env.local
+
+# Per-machine Claude Code permissions.
+.claude/settings.local.json
+
+# LLM fixtures ARE committed: the offline demo depends on them (rule 8).
+!llm/fixtures/
+!llm/fixtures/*.json
+
+# OS
+.DS_Store
+Thumbs.db

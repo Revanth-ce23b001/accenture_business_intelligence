@@ -1,0 +1,69 @@
+# Competitor intelligence — the resolution path offered by case #2467.
+#
+# This playbook buys INFORMATION, not recovery. Its recovery curve is the
+# null curve by design: subscribing to a price feed does not win back a
+# single rupee. It is ranked by the value of the decision it unblocks.
+
+playbook: competitor_intelligence
+version: 1
+
+driver: competitor_action
+lever: acquire_missing_source
+
+action: |
+  Subscribe to a competitor price and promotion feed covering the
+  catchments in scope, and backfill at least two quarters of history so
+  the first case that uses it has a pre-period to test against.
+
+  A feed with no history cannot support a temporal-precedence test, which
+  is the whole reason the hypothesis is currently unverifiable. Buying
+  the feed without the backfill defers the problem by two quarters
+  rather than solving it.
+
+cost_model:
+  type: annual_subscription
+  unit: year
+  scales_with: none
+  unit_cost_inr: 400000
+  fixed_cost_inr: 0
+  currency: INR
+  note: >
+    Recurring annual licence for the feed plus the one-off historical
+    backfill, which the vendor bundles. Does not scale with store count.
+
+lead_time:
+  value: 2
+  unit: weeks
+  note: Contracting plus first delivery, including the historical backfill.
+
+owner_role: category_director
+
+recovery_curve_ref: instrumentation_none
+
+monitoring_plan:
+  primary_kpi: net_revenue
+  secondary_kpis: [transactions, conversion_rate]
+  cadence: weekly
+  horizon_weeks: 26
+  checkpoints:
+    - at_week: 2
+      expect: Feed live with at least two quarters of backfilled history.
+    - at_week: 13
+      expect: At least one closed case has used the feed to test a competitor hypothesis.
+    - at_week: 26
+      expect: >
+        Calibration for competitor-attribution cases is recomputed on the
+        enlarged sample and compared against the publication floor.
+  kill_criterion: >
+    If the feed's catchment coverage turns out to be below the share of
+    stores in a typical case scope, it cannot resolve the hypothesis at
+    store level and the subscription should lapse rather than renew.
+  escalation_role: cxo
+
+linked_case_template:
+  driver: competitor_action
+  question: >
+    Re-open the abstained case once the feed has enough history to run a
+    temporal-precedence test. The case is not closed, it is deferred.
+  scope_hint: same_as_originating_case
+  rationale: resolution of a named unknown

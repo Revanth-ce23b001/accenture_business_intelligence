@@ -1,0 +1,154 @@
+# Quick-commerce fulfilment rate — the KPI behind case #2471.
+#
+# READ THIS BEFORE "FIXING" THIS FILE.
+#
+# Three fields here are deliberately incomplete, and the incompleteness is
+# the point. This KPI launched seven weeks ago:
+#
+#   history_weeks: 7          against baseline.min_history_weeks: 26
+#   baseline.method: null     no seasonal profile can be fitted yet
+#   thresholds.materiality: null   no defensible limit has been agreed
+#
+# Together these make case #2471 stop at Gate 3 with INSUFFICIENT_HISTORY
+# deterministically, and put the KPI in monitoring only. Supplying any of
+# the three would silently delete that scenario. Do not fill them in until
+# the KPI actually has the history.
+
+kpi: qcomm_fulfilment_rate
+version: 1
+display_name: Q-Commerce Fulfilment Rate
+unit: pct
+owner_role: ecommerce_lead
+lifecycle: monitoring_only
+
+definition: |
+  Share of quick-commerce orders fulfilled complete and within the
+  promised delivery window, measured at order level.
+
+  An order is fulfilled only if every line ships and the delivery
+  timestamp falls inside the promised window. A partial ship counts as
+  a miss, not a fraction — the customer experience is binary.
+
+  Scope is the quick-commerce channel only. This is the one KPI where
+  channel = 'B2B' is not excluded, because quick-commerce dark-store
+  replenishment settles through the same channel code; txn_type =
+  'TRANSFER' remains excluded.
+
+formula_sql: |
+  SELECT
+      d.region,
+      o.dark_store_id AS store_id,
+      DATE_TRUNC(:grain, o.order_ts) AS period,
+      100.0 * SUM(CASE
+                    WHEN o.lines_shipped = o.lines_ordered
+                     AND o.delivered_ts <= o.promised_ts
+                    THEN 1 ELSE 0
+                  END)
+            / NULLIF(COUNT(*), 0) AS qcomm_fulfilment_rate_pct
+  FROM fact_qcomm_order AS o
+  JOIN dim_store AS d
+    ON d.store_id = o.dark_store_id
+  WHERE o.txn_type <> 'TRANSFER'
+    AND o.order_ts >= :period_start
+    AND o.order_ts <  :period_end
+  GROUP BY 1, 2, 3
+
+grain:
+  supported: [daily, weekly]
+  default: weekly
+
+dimensions:
+  - region
+  - city
+  - dark_store_id
+  - category
+  - promise_band
+
+source_systems:
+  - name: qcomm_oms
+    description: Quick-commerce order management system
+    tables: [fact_qcomm_order]
+    reliability_tier: structured_query
+  - name: erp
+    description: Dark-store master data
+    tables: [dim_store]
+    reliability_tier: structured_query
+
+refresh:
+  cadence: daily
+  time_ist: "04:00"
+  sla_hours: 12
+  restatement_window_days: 2
+
+thresholds:
+  # Deliberately unset — see the header. No materiality limit has been
+  # agreed for a KPI with seven weeks of history, so no movement on it can
+  # be declared material and no case may be opened.
+  materiality: null
+  statistical_method: none
+  band_lookback_weeks: null
+  band_quantile: null
+  persistence_periods: null
+  min_relative_movement_pct: null
+
+baseline:
+  # Deliberately null — twenty-six weeks are required before a seasonal
+  # profile means anything, and only seven exist.
+  method: null
+  min_history_weeks: 26
+  seasonal_period_days: 7
+  calendar_regressors: []
+
+history_weeks: 7
+
+drivers:
+  - on_shelf_availability
+
+related_kpis:
+  - on_shelf_availability
+  - net_revenue
+
+lineage_stages:
+  - stage: ingest
+    description: Quick-commerce order events land in raw storage
+    produces: raw.qcomm_order
+  - stage: conform
+    description: Join to dark-store master, drop transfers
+    produces: fact_qcomm_order
+  - stage: aggregate
+    description: Complete-and-on-time orders over total orders
+    produces: agg.qcomm_fulfilment_rate
+
+access_policy:
+  default_persona: analyst
+  personas:
+    cxo:
+      row_predicate: "TRUE"
+      masked_columns: []
+    ecommerce_lead:
+      row_predicate: "TRUE"
+      masked_columns: []
+    finance_controller:
+      row_predicate: "TRUE"
+      masked_columns: []
+    regional_manager:
+      row_predicate: "region = :user_region"
+      masked_columns: [courier_cost, rider_id]
+    store_manager:
+      row_predicate: "store_id = :user_store_id"
+      masked_columns: [courier_cost, rider_id, margin_pct]
+    analyst:
+      row_predicate: "TRUE"
+      masked_columns: [customer_phone, customer_email, rider_id]
+
+confidence_rules:
+  required_sources: [qcomm_oms, erp]
+  min_source_reliability: 0.60
+  freshness_full_credit_hours: 24
+  freshness_zero_credit_hours: 96
+  regime_change_penalty: 0.15
+  publication_floor: 0.70
+  coverage_note: >
+    With seven weeks of history the historical-depth component cannot
+    clear its floor, so this KPI could not reach a published verdict even
+    if a materiality limit were set.

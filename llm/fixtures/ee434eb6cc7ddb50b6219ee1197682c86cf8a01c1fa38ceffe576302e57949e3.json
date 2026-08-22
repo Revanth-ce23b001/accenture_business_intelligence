@@ -1,0 +1,18 @@
+{
+  "fingerprint": "ee434eb6cc7ddb50b6219ee1197682c86cf8a01c1fa38ceffe576302e57949e3",
+  "model": "claude-haiku-4-5",
+  "note": "P1 smoke fixture - intent classification, recorded offline",
+  "response": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "from_fixture": false,
+    "input_tokens": 48,
+    "latency_ms": null,
+    "model": "claude-haiku-4-5",
+    "output_tokens": 6,
+    "request_fingerprint": "ee434eb6cc7ddb50b6219ee1197682c86cf8a01c1fa38ceffe576302e57949e3",
+    "stop_reason": "end_turn",
+    "text": "diagnose_kpi_movement"
+  },
+  "task": "classify"
+}

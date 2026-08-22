@@ -1,0 +1,149 @@
+kpi: avg_selling_price
+version: 1
+display_name: Average Selling Price
+unit: INR
+owner_role: category_director
+
+definition: |
+  Net revenue divided by units sold, in rupees per unit.
+
+  Computed from the same netted revenue as net_revenue, so a discount
+  shows up as a lower ASP rather than as a separate discount metric.
+  Scope exclusions match net_revenue: channel = 'B2B' and
+  txn_type = 'TRANSFER' are excluded.
+
+  ASP moves for two distinct reasons — a genuine price change, or a shift
+  in what customers bought. The two are separated at the decompose stage
+  by holding the sub-category mix constant; unadjusted ASP movement must
+  never be presented as a price decision.
+
+formula_sql: |
+  SELECT
+      d.region,
+      d.store_id,
+      s.sub_category,
+      DATE_TRUNC(:grain, f.txn_date) AS period,
+      SUM(f.gross_amount
+          - f.returns_amount
+          - f.discount_amount
+          - f.tax_amount)
+        / NULLIF(SUM(f.units), 0) AS avg_selling_price_inr
+  FROM fact_sales AS f
+  JOIN dim_store AS d USING (store_id)
+  JOIN dim_sku   AS s USING (sku_id)
+  WHERE f.channel <> 'B2B'
+    AND f.txn_type <> 'TRANSFER'
+    AND f.txn_date >= :period_start
+    AND f.txn_date <  :period_end
+  GROUP BY 1, 2, 3, 4
+
+grain:
+  supported: [daily, weekly, monthly]
+  default: monthly
+
+dimensions:
+  - region
+  - city
+  - store_id
+  - category
+  - sub_category
+  - sku
+
+source_systems:
+  - name: pos
+    description: Point-of-sale transaction log, including units
+    tables: [fact_sales]
+    reliability_tier: structured_query
+  - name: erp
+    description: SKU and store master data
+    tables: [dim_sku, dim_store]
+    reliability_tier: structured_query
+  - name: pricing
+    description: Price-change log, used to separate price from mix
+    tables: [fact_price_change]
+    reliability_tier: structured_query
+
+refresh:
+  cadence: daily
+  time_ist: "02:45"
+  sla_hours: 6
+  restatement_window_days: 7
+
+thresholds:
+  materiality:
+    value: 2.0
+    unit: pct
+    display: "2.0%"
+    note: Mix-adjusted relative movement.
+  statistical_method: residual_quantile_band
+  band_lookback_weeks: 8
+  band_quantile: 0.90
+  persistence_periods: 2
+  min_relative_movement_pct: 2.0
+
+baseline:
+  method: stl_plus_calendar_regression
+  min_history_weeks: 26
+  seasonal_period_days: 7
+  calendar_regressors:
+    - festival_window
+    - month_end
+    - markdown_window
+
+history_weeks: 78
+
+drivers:
+  - on_shelf_availability
+
+related_kpis:
+  - net_revenue
+  - transactions
+  - conversion_rate
+
+lineage_stages:
+  - stage: ingest
+    description: POS files and the price-change log land in raw storage
+    produces: raw.pos_txn, raw.price_change
+  - stage: conform
+    description: Join to SKU master, apply scope exclusions
+    produces: fact_sales, fact_price_change
+  - stage: aggregate
+    description: Netted revenue over units at the requested grain
+    produces: agg.avg_selling_price
+  - stage: decompose
+    description: Hold sub-category mix constant to separate price from mix
+    produces: agg.asp_price_effect, agg.asp_mix_effect
+
+access_policy:
+  default_persona: analyst
+  personas:
+    cxo:
+      row_predicate: "TRUE"
+      masked_columns: []
+    finance_controller:
+      row_predicate: "TRUE"
+      masked_columns: []
+    category_director:
+      row_predicate: "TRUE"
+      masked_columns: []
+    regional_manager:
+      row_predicate: "region = :user_region"
+      masked_columns: [cost_price, margin_pct]
+    store_manager:
+      row_predicate: "store_id = :user_store_id"
+      masked_columns: [cost_price, margin_pct, staff_cost]
+    analyst:
+      row_predicate: "TRUE"
+      masked_columns: [cost_price, customer_phone, customer_email]
+
+confidence_rules:
+  required_sources: [pos, erp]
+  min_source_reliability: 0.60
+  freshness_full_credit_hours: 24
+  freshness_zero_credit_hours: 96
+  regime_change_penalty: 0.15
+  publication_floor: 0.70
+  coverage_note: >
+    A price hypothesis additionally requires the pricing source. Without
+    it the price and mix effects cannot be separated, and the hypothesis
+    is unverifiable rather than merely weak.

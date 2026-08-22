@@ -1,0 +1,133 @@
+# Case #2451 — West, net revenue, Nov 2025 (monthly) -> PARTIALLY EXPLAINED
+#
+# THE CAUSAL CHAIN. Read this before changing a number.
+#
+# Nothing is added to treated stores' revenue. The decline is produced by
+# one mechanism, applied at store x SKU x day:
+#
+#   1. A DC allocation fault starves 34 West stores of the affected SKUs.
+#   2. Their on-shelf availability falls from ~94% to ~71% on the top-20.
+#   3. Units are suppressed by an elasticity on availability:
+#
+#        units = units_base * (1 - beta * demand_weighted_gap)
+#
+#      where gap = 1 - availability, weighted by each SKU's demand share.
+#   4. Revenue falls because units fell. Nothing else is touched.
+#
+# beta > 1 is basket abandonment: a shopper who came for an out-of-stock
+# hero SKU sometimes leaves with nothing, losing the AVAILABLE items in
+# the basket too. That is why the revenue loss exceeds the affected SKUs'
+# own share, and it is the reason the effect is not merely proportional.
+#
+# The DiD, the dose-response r, and the parallel-trends p-value are all
+# MEASURED off this mechanism. None of them is set.
+
+case_id: "2451"
+scope: West
+kpi: net_revenue
+grain: monthly
+period: "2025-11"
+comparison_period: "2025-10"
+
+targets:
+  west_net_revenue_m_minus_1_inr_cr: 83.70
+  west_net_revenue_m_inr_cr: 76.92
+  headline_movement_pct: -8.1
+  absolute_decline_inr_cr: 6.78
+  calendar_attributed_pt: -3.2
+  calendar_attributed_inr_cr: 2.68
+  qualified_residual_pt: -4.9
+  qualified_residual_inr_cr: 4.10
+  west_empirical_band_pt: 1.8
+  regional_residual_strip_pt:
+    North: -0.4
+    South: 1.1
+    East: -0.6
+    West: -4.9
+
+mechanism:
+  treated_store_count: 34
+  matched_control_count: 34
+  affected_sku_volume_share: 0.61
+  availability_before_pct: 94.0
+  availability_after_pct: 71.0
+  onset_date: "2025-11-04"
+  ramp_days: 5
+
+  # THE tunable. Availability elasticity including basket spillover.
+  # Calibrated so the measured West-level effect lands on the registry's
+  # DiD target; it is not a knob on revenue.
+  availability_elasticity_beta: 1.26
+
+  # Treated stores are drawn from the upper half of the West size
+  # distribution — a DC allocation fault hits the stores that pull the
+  # most stock. This is a mechanism choice, and it is why treated stores
+  # carry more than 34/140 of West revenue.
+  treated_selection: upper_half_by_size
+  treated_revenue_share_target: 0.29
+
+measured_targets:
+  # Emergent statistics. The generator does not set these; the test reads
+  # them back off the generated data.
+  matched_control_did_pt: -4.3
+  matched_control_did_max_p: 0.01
+  parallel_trends_p: 0.41
+  dose_response_r: 0.71
+  h1_attribution_pt: 3.87
+  h1_attribution_inr_cr: 3.24
+  h1_attribution_share: 0.79
+  unattributed_residual_pt: 1.03
+  unattributed_residual_inr_cr: 0.86
+
+evidence:
+  top20_availability_treated_before_pct: 94
+  top20_availability_treated_after_pct: 71
+  store_notes_flagging_treated: 21
+  store_notes_flagging_control: 2
+  store_notes_chi2_max_p: 0.001
+  support_tickets_count: 340
+  support_tickets_increase_pct: 186
+
+competing_hypotheses:
+  H3_price:
+    driver: price_increase
+    asp_increase_pct: 4.1
+    volume_share: 0.08
+    max_impact_pt: 0.4
+    eliminated_on: sufficiency
+  H4_marketing:
+    driver: promo_lapse
+    spend_change_pct: -22
+    onset_offset_days: 11
+    eliminated_on: precedence
+  H5_complaints:
+    driver: competitor_action
+    complaint_increase_pct: 31
+    onset_offset_days: 6
+    eliminated_on: precedence_and_confounder
+
+confidence:
+  s1: 0.93
+  s2: 1.00
+  s3: 0.84
+  s4: 0.90
+  s5: 0.72
+  s6: 0.79
+  raw: 0.8876
+  calibrated: 0.84
+
+recommendation:
+  playbook: availability_recovery
+  action_cost_inr_l: 18
+  expected_recovery_low_inr_cr: 2.3
+  expected_recovery_high_inr_cr: 3.1
+  roi_low: 13
+  roi_high: 17
+  recovery_confidence: Medium
+  recovery_sample_size: 3
+  call_down_managers: 9
+  call_down_hours: 2
+
+verdict:
+  value: PARTIALLY_EXPLAINED
+  reason_code: live_unverifiable_above_materiality

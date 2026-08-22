@@ -1,0 +1,148 @@
+# Conversion rate — the KPI behind case #2467 (East, INSUFFICIENT EVIDENCE).
+
+kpi: conversion_rate
+version: 1
+display_name: Conversion Rate
+unit: pt
+owner_role: retail_operations_lead
+
+definition: |
+  Share of store visits that end in a completed transaction, expressed in
+  percentage points.
+
+  Denominator is footfall as counted by door sensors, not estimated. This
+  matters: only a subset of the estate carries counters, so the KPI is
+  only computable where instrumentation exists, and a store without a
+  counter is excluded from the denominator rather than imputed.
+
+  Numerator follows the net_revenue scope: channel = 'B2B' and
+  txn_type = 'TRANSFER' are excluded.
+
+formula_sql: |
+  SELECT
+      d.region,
+      d.store_id,
+      DATE_TRUNC(:grain, f.txn_date) AS period,
+      100.0 * COUNT(DISTINCT f.txn_id)
+            / NULLIF(SUM(v.footfall), 0) AS conversion_rate_pt
+  FROM fact_sales AS f
+  JOIN dim_store AS d USING (store_id)
+  JOIN fact_footfall AS v
+    ON v.store_id = f.store_id
+   AND v.footfall_date = f.txn_date
+  WHERE f.channel <> 'B2B'
+    AND f.txn_type <> 'TRANSFER'
+    AND d.has_footfall_counter = TRUE
+    AND f.txn_date >= :period_start
+    AND f.txn_date <  :period_end
+  GROUP BY 1, 2, 3
+
+grain:
+  supported: [daily, weekly, monthly]
+  default: monthly
+
+dimensions:
+  - region
+  - city
+  - store_id
+  - store_format
+
+source_systems:
+  - name: pos
+    description: Point-of-sale transaction log
+    tables: [fact_sales]
+    reliability_tier: structured_query
+  - name: footfall
+    description: Door-sensor footfall counters. Partial estate coverage.
+    tables: [fact_footfall]
+    reliability_tier: structured_query
+  - name: erp
+    description: Store master, including counter installation flag
+    tables: [dim_store]
+    reliability_tier: structured_query
+
+refresh:
+  cadence: daily
+  time_ist: "03:15"
+  sla_hours: 8
+  restatement_window_days: 2
+
+thresholds:
+  materiality:
+    value: 0.5
+    unit: pt
+    display: "0.5 pt"
+    note: >
+      Absolute percentage points, not relative. #2467's residual of
+      1.2 pt clears this comfortably — the case abstains on evidence,
+      not on materiality.
+  statistical_method: residual_quantile_band
+  band_lookback_weeks: 8
+  band_quantile: 0.90
+  persistence_periods: 2
+  min_relative_movement_pct: 2.0
+
+baseline:
+  method: stl_plus_calendar_regression
+  min_history_weeks: 26
+  seasonal_period_days: 7
+  calendar_regressors:
+    - festival_window
+    - weekend
+    - month_end
+    - public_holiday
+
+history_weeks: 78
+
+drivers:
+  - on_shelf_availability
+  - avg_selling_price
+
+related_kpis:
+  - net_revenue
+  - transactions
+
+lineage_stages:
+  - stage: ingest
+    description: POS files and footfall counter feeds land in raw storage
+    produces: raw.pos_txn, raw.footfall
+  - stage: conform
+    description: Restrict to instrumented stores, apply scope exclusions
+    produces: fact_sales, fact_footfall
+  - stage: aggregate
+    description: Transactions over footfall at the requested grain
+    produces: agg.conversion_rate
+  - stage: decompose
+    description: STL plus calendar regression, plus basket-mix adjustment
+    produces: agg.conversion_rate_residual
+
+access_policy:
+  default_persona: analyst
+  personas:
+    cxo:
+      row_predicate: "TRUE"
+      masked_columns: []
+    finance_controller:
+      row_predicate: "TRUE"
+      masked_columns: []
+    regional_manager:
+      row_predicate: "region = :user_region"
+      masked_columns: [staff_cost, staff_headcount]
+    store_manager:
+      row_predicate: "store_id = :user_store_id"
+      masked_columns: [staff_cost, staff_headcount, margin_pct]
+    analyst:
+      row_predicate: "TRUE"
+      masked_columns: [customer_phone, customer_email, staff_cost]
+
+confidence_rules:
+  required_sources: [pos, footfall, erp]
+  min_source_reliability: 0.60
+  freshness_full_credit_hours: 24
+  freshness_zero_credit_hours: 96
+  regime_change_penalty: 0.15
+  publication_floor: 0.70
+  coverage_note: >
+    Footfall instrumentation is partial. A scope whose instrumented share
+    falls below the gather stage's coverage requirement cannot reach
+    EXPLAINED on this KPI.

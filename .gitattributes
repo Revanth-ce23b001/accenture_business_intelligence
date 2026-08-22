@@ -1,0 +1,13 @@
+# Normalise text in the repository; let git decide the working-copy ending.
+* text=auto
+
+# These break with CRLF: make treats a trailing \r as part of the recipe, and
+# shell scripts fail with "bad interpreter". Force LF on checkout everywhere.
+Makefile        text eol=lf
+*.mk            text eol=lf
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+
+# Fixtures are content-hashed; keep them byte-stable across platforms.
+llm/fixtures/*.json text eol=lf
