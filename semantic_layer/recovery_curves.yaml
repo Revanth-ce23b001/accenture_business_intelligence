@@ -1,0 +1,81 @@
+# Recovery curves.
+#
+# Every playbook carries a mandatory `recovery_curve_ref` that must resolve
+# to a key in this file. A curve turns attributable loss into an expected
+# recovery range — never a point estimate, because the spread is the
+# honest part.
+#
+# `p25` and `p75` are the share of attributable loss recovered by
+# `horizon_weeks`, taken from the interquartile range of comparable closed
+# interventions. `sample_size` is how many; it drives the Low/Medium/High
+# label on the recommendation, so a curve fitted on three cases must say
+# so rather than presenting a confident band.
+#
+# A curve whose p75 exceeds 1.0 would claim an action recovers more than
+# the loss it addresses. The loader rejects that.
+
+version: 1
+
+curves:
+
+  availability_restock:
+    description: >
+      Expedited replenishment into stores that lost shelf availability.
+      Recovery is fast but incomplete — some demand was one-off and does
+      not return once the customer bought elsewhere.
+    p25: 0.71
+    p75: 0.96
+    horizon_weeks: 8
+    sample_size: 3
+    confidence_label: Medium
+    basis: Comparable expedited-logistics interventions in the trailing 12 months.
+
+  price_rollback:
+    description: >
+      Reversing or softening a price increase. Slower than restock —
+      shoppers re-learn the price over several trips — but more complete,
+      because the demand did not disappear, it deferred.
+    p25: 0.55
+    p75: 0.88
+    horizon_weeks: 12
+    sample_size: 5
+    confidence_label: Medium
+    basis: Closed price-correction cases where the price event was confirmed in the pricing log.
+
+  promo_reinstate:
+    description: >
+      Reinstating a lapsed promotion. Highest recovery share of any
+      lever, because the mechanism is known to work on this audience.
+    p25: 0.78
+    p75: 0.98
+    horizon_weeks: 6
+    sample_size: 9
+    confidence_label: High
+    basis: Closed promo-lapse cases with a confirmed promotion-window boundary.
+
+  staffing_restore:
+    description: >
+      Restoring shift coverage to plan. Recovery is prompt but bounded —
+      it recovers service, not the trips that were not made.
+    p25: 0.60
+    p75: 0.85
+    horizon_weeks: 4
+    sample_size: 6
+    confidence_label: Medium
+    basis: Closed staffing cases where roster variance was confirmed against actuals.
+
+  instrumentation_none:
+    description: >
+      The null curve. Used by playbooks whose action buys INFORMATION
+      rather than recovery — a data feed, a sensor install. These
+      resolve an unknown; they do not themselves recover revenue, and
+      claiming otherwise would double-count the recovery that a later,
+      properly-evidenced action delivers.
+    p25: 0.0
+    p75: 0.0
+    horizon_weeks: 0
+    sample_size: 0
+    confidence_label: Low
+    basis: >
+      Not fitted. Zero by construction — an instrumentation playbook is
+      ranked by the value of the decision it unblocks, not by recovery.

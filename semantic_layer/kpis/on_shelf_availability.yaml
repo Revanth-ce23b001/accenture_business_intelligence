@@ -1,0 +1,151 @@
+# On-shelf availability — the driver H1 rests on in case #2451.
+
+kpi: on_shelf_availability
+version: 1
+display_name: On-Shelf Availability
+unit: pct
+owner_role: supply_chain_director
+
+definition: |
+  Share of ranged SKUs physically available on shelf at a store, measured
+  from the inventory snapshot taken at 12:00 IST each day.
+
+  Ranged means the SKU is in the store's assortment for that period; a
+  SKU that was never ranged is not a gap. Availability is measured
+  against the assortment in force on the snapshot date, so an assortment
+  change moves the denominator, not the numerator — which is why
+  assortment_change is a separate hypothesis from stock_out.
+
+  Snapshot time is part of the definition. A midday snapshot understates
+  end-of-day depletion and overstates morning replenishment; comparisons
+  across stores are only valid because every store is snapped at the same
+  hour.
+
+formula_sql: |
+  SELECT
+      d.region,
+      d.store_id,
+      DATE_TRUNC(:grain, i.snapshot_date) AS period,
+      100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0) AS on_shelf_availability_pct
+  FROM fact_inventory_snapshot AS i
+  JOIN dim_store AS d USING (store_id)
+  JOIN dim_assortment AS a
+    ON a.store_id = i.store_id
+   AND a.sku_id   = i.sku_id
+   AND i.snapshot_date BETWEEN a.valid_from AND a.valid_to
+  WHERE i.snapshot_hour_ist = 12
+    AND i.snapshot_date >= :period_start
+    AND i.snapshot_date <  :period_end
+  GROUP BY 1, 2, 3
+
+grain:
+  supported: [daily, weekly, monthly]
+  default: weekly
+
+dimensions:
+  - region
+  - city
+  - store_id
+  - store_format
+  - category
+  - sub_category
+  - sku
+  - abc_class
+
+source_systems:
+  - name: wms
+    description: Warehouse and store inventory snapshots
+    tables: [fact_inventory_snapshot]
+    reliability_tier: structured_query
+  - name: erp
+    description: Assortment and SKU master
+    tables: [dim_assortment, dim_sku, dim_store]
+    reliability_tier: structured_query
+  - name: store_notes
+    description: Free-text shift notes filed by store staff
+    tables: [raw_store_notes]
+    reliability_tier: store_note
+
+refresh:
+  cadence: daily
+  time_ist: "13:00"
+  sla_hours: 4
+  restatement_window_days: 1
+
+thresholds:
+  materiality:
+    value: 2.0
+    unit: pt
+    display: "2.0 pt"
+    note: Absolute percentage points of availability.
+  statistical_method: residual_quantile_band
+  band_lookback_weeks: 8
+  band_quantile: 0.90
+  persistence_periods: 3
+  min_relative_movement_pct: 2.0
+
+baseline:
+  method: stl_plus_calendar_regression
+  min_history_weeks: 26
+  seasonal_period_days: 7
+  calendar_regressors:
+    - festival_window
+    - weekend
+    - replenishment_cycle
+
+history_weeks: 78
+
+drivers: []
+
+related_kpis:
+  - net_revenue
+  - conversion_rate
+  - transactions
+
+lineage_stages:
+  - stage: ingest
+    description: Nightly inventory snapshots land in raw storage
+    produces: raw.inventory_snapshot
+  - stage: conform
+    description: Restrict to the 12:00 snapshot and join to the ranged assortment
+    produces: fact_inventory_snapshot
+  - stage: aggregate
+    description: Available ranged SKUs over ranged SKUs at the requested grain
+    produces: agg.on_shelf_availability
+  - stage: decompose
+    description: STL plus replenishment-cycle regression
+    produces: agg.osa_residual
+
+access_policy:
+  default_persona: analyst
+  personas:
+    cxo:
+      row_predicate: "TRUE"
+      masked_columns: []
+    supply_chain_director:
+      row_predicate: "TRUE"
+      masked_columns: []
+    finance_controller:
+      row_predicate: "TRUE"
+      masked_columns: []
+    regional_manager:
+      row_predicate: "region = :user_region"
+      masked_columns: [supplier_cost, supplier_name]
+    store_manager:
+      row_predicate: "store_id = :user_store_id"
+      masked_columns: [supplier_cost, supplier_name, margin_pct]
+    analyst:
+      row_predicate: "TRUE"
+      masked_columns: [supplier_cost]
+
+confidence_rules:
+  required_sources: [wms, erp]
+  min_source_reliability: 0.60
+  freshness_full_credit_hours: 24
+  freshness_zero_credit_hours: 72
+  regime_change_penalty: 0.15
+  publication_floor: 0.70
+  coverage_note: >
+    Store notes are a corroborating source only. Text alone never reaches
+    a verdict on this KPI; text plus a matched control does.

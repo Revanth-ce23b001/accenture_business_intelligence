@@ -1,0 +1,63 @@
+# Staffing uplift.
+
+playbook: staffing_uplift
+version: 1
+
+driver: staffing_shortfall
+lever: restore_shift_coverage
+
+action: |
+  Restore shift coverage to plan in the affected stores, prioritising the
+  peak hours where the roster variance is concentrated rather than
+  spreading added hours evenly across the week.
+
+  A shortfall is almost never uniform. Adding hours at 11:00 when the
+  gap is at 18:00 costs the same and recovers nothing.
+
+cost_model:
+  type: per_store_unit_cost
+  unit: store_week
+  scales_with: affected_store_count
+  unit_cost_inr: 24000
+  fixed_cost_inr: 0
+  currency: INR
+  note: >
+    Incremental wage cost of restoring peak-hour coverage for one store
+    for one week, at the blended rate including overtime loading.
+    Multiplied by affected stores and by the horizon in weeks.
+
+lead_time:
+  value: 7
+  unit: days
+  note: One roster cycle. Shifts cannot be re-cut mid-cycle without penalty.
+
+owner_role: retail_operations_lead
+
+recovery_curve_ref: staffing_restore
+
+monitoring_plan:
+  primary_kpi: conversion_rate
+  secondary_kpis: [transactions, net_revenue]
+  cadence: weekly
+  horizon_weeks: 4
+  checkpoints:
+    - at_week: 1
+      expect: Actual coverage matches plan in peak hours.
+    - at_week: 2
+      expect: Conversion in affected stores moving toward the control group.
+    - at_week: 4
+      expect: Recovery share inside the curve's p25-p75 range.
+  kill_criterion: >
+    If coverage is at plan for two weeks and conversion has not moved,
+    staffing was not the constraint. Stop the overtime spend and re-open
+    the case — the most common answer underneath is availability.
+  escalation_role: supply_chain_director
+
+linked_case_template:
+  driver: stock_out
+  question: >
+    Were staff absent, or were they present and unable to sell because
+    the shelf was empty? Roster variance and availability collapse
+    produce the same conversion signature.
+  scope_hint: same_as_originating_case
+  rationale: competing explanation with an identical signature

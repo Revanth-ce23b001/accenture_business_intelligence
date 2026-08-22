@@ -1,0 +1,262 @@
+# Adjudication constants.
+#
+# WHY THIS FILE EXISTS
+#
+# CLAUDE.md rule 2: "No threshold lives in Python. All thresholds,
+# materiality limits, access rules and priors come from
+# semantic_layer/*.yaml."
+#
+# KPI-specific thresholds live in kpis/*.yaml and priors live in
+# causal_graph.yaml. Everything else the adjudicator needs — the
+# confidence weights, the cap ceilings, the verdict-table cutoffs, the
+# trigger thresholds, the test weights and the seven reliability weights —
+# has no other home. It lives here so that engine/ contains no number.
+#
+# Every value below is transcribed from CLAUDE.md. Do not tune them to
+# make an implementation reproduce a Number Registry value; if a registry
+# value will not reproduce, that is a discrepancy to report (rule 10).
+
+version: 1
+
+# --------------------------------------------------------------------------
+# Confidence — CLAUDE.md "Confidence specification"
+#
+#   conf_raw = 0.28*s1 + 0.20*s2 + 0.16*s3 + 0.14*s4 + 0.10*s5 + 0.12*s6
+#
+# These six weights sum to exactly 1.00.
+# --------------------------------------------------------------------------
+confidence:
+  components:
+    s1:
+      name: Evidence strength
+      weight: 0.28
+      method: sigmoid_abs_did_t_stat
+      penalise_when: parallel_trends_pretest_fails
+    s2:
+      name: Test coverage
+      weight: 0.20
+      method: applicable_tests_passed_over_applicable_tests
+    s3:
+      name: Source agreement
+      weight: 0.16
+      method: structured_unstructured_concordance
+    s4:
+      name: Data quality
+      weight: 0.14
+      method: min_over_required_sources_of_freshness_times_completeness
+    s5:
+      name: Historical depth
+      weight: 0.10
+      method: min_1_history_weeks_over_reference
+      reference_weeks: 52
+      regime_change_penalty: 0.15
+    s6:
+      name: Residual coverage
+      weight: 0.12
+      method: share_of_qualified_residual_attributed
+
+  # Applied AFTER the weighted sum. A cap cannot be outvoted.
+  #
+  # Scope note, and it decides #2451: these caps are evaluated PER
+  # HYPOTHESIS, against the hypothesis under adjudication. A competing
+  # hypothesis being unverifiable does not cap the leading hypothesis's
+  # confidence — it is handled by the verdict decision table instead.
+  # On #2451 no cap fires.
+  caps:
+    confounder_screen_failed:
+      condition: Test 6 found an unresolved confounder OF THIS HYPOTHESIS
+      ceiling: 0.85
+      forced_trigger: null
+    required_source_missing:
+      condition: A source required by this hypothesis is not held
+      ceiling: 0.45
+      forced_trigger: T3
+    temporal_precedence_failed:
+      condition: Cause onset is not before effect onset
+      ceiling: 0.0
+      eliminates_hypothesis: true
+      forced_trigger: null
+    low_reliability_dominated:
+      condition: Evidence dominated by reliability weights below the floor
+      ceiling: 0.65
+      forced_trigger: null
+
+  calibration:
+    method: isotonic
+    publication_floor: 0.70
+    max_expected_calibration_error: 0.05
+    min_cases_for_band: 5
+
+# --------------------------------------------------------------------------
+# Verdict decision table — CLAUDE.md "Verdict decision table"
+#
+# Evaluated strictly in order. Any trigger firing short-circuits to
+# INSUFFICIENT EVIDENCE before the coverage and confidence tests run.
+# --------------------------------------------------------------------------
+verdict:
+  explained:
+    min_coverage: 0.70
+    min_confidence: 0.70
+    forbid_live_unverifiable_above_materiality: true
+  partially_explained:
+    min_coverage: 0.30
+    min_confidence: 0.60
+  reason_codes:
+    coverage_below_threshold: "coverage below 0.70"
+    live_unverifiable_above_materiality: "live-unverifiable hypothesis above materiality"
+
+# --------------------------------------------------------------------------
+# Abstention triggers — CLAUDE.md "Abstention triggers"
+#
+# Each is a named deterministic boolean evaluated outside the model, and
+# each is surfaced by name in the UI when it fires.
+#
+# Scope note: T1, T2 and T3 are evaluated against the LEADING hypothesis.
+# Without that restriction #2451 would abstain, because its competing
+# hypothesis H2 is unverifiable by construction.
+# --------------------------------------------------------------------------
+triggers:
+  T1:
+    name: No hypothesis passes both hard gates
+    evaluated_against: leading_hypothesis
+  T2:
+    name: Best hypothesis explains too little of the qualified residual
+    evaluated_against: leading_hypothesis
+    min_residual_share: 0.30
+  T3:
+    name: Leading hypothesis requires a source the organisation does not hold
+    evaluated_against: leading_hypothesis
+  T4:
+    name: Two or more hypotheses statistically indistinguishable
+    evaluated_against: all_live_hypotheses
+    max_confidence_separation: 0.10
+  T5:
+    name: Evidence internally contradictory across independent sources
+    evaluated_against: all_evidence
+    min_independent_sources: 2
+  T6:
+    name: Evidence dominated by low-reliability unstructured sources
+    evaluated_against: leading_hypothesis
+    reliability_floor: 0.60
+    max_low_reliability_share: 0.50
+  T7:
+    name: Historical calibration for this case type below the publication floor
+    evaluated_against: case_type
+    publication_floor: 0.70
+    min_closed_cases: 5
+  T8:
+    name: A known-relevant source is stale or unavailable
+    evaluated_against: required_sources
+    max_staleness_hours: 48
+
+# --------------------------------------------------------------------------
+# The six adjudication tests — CLAUDE.md "The six adjudication tests"
+#
+# OPEN ITEM, deliberately not resolved here: the three weighted tests sum
+# to 0.75, not 1.00, and CLAUDE.md does not say what consumes them. They
+# are transcribed as written rather than normalised. Whatever reads them
+# must state its own normalisation; do not quietly rescale this file.
+# --------------------------------------------------------------------------
+tests:
+  precedence:
+    test_id: 1
+    name: Temporal precedence
+    type: hard_gate
+    method: pelt_changepoint
+    requirement: cause_onset_before_effect_onset
+    weight: null
+  sufficiency:
+    test_id: 2
+    name: Effect-size sufficiency
+    type: hard_gate
+    method: volume_share_times_elasticity
+    requirement: modelled_max_impact_at_least_residual_share
+    min_residual_share: 0.30
+    weight: null
+  dose_response:
+    test_id: 3
+    name: Dose-response
+    type: weighted
+    method: ols_store_effect_on_store_cause
+    weight: 0.15
+    min_r: 0.30
+  specificity:
+    test_id: 4
+    name: Specificity
+    type: weighted
+    method: welch_t_test_present_vs_absent
+    weight: 0.15
+    max_p_value: 0.05
+  did:
+    test_id: 5
+    name: Matched-control difference-in-differences
+    type: weighted
+    method: covariate_matched_did
+    weight: 0.45
+    max_p_value: 0.01
+    matching_covariates: [store_format, catchment_type, sqft, staffing, pre_trend_8wk]
+    pretest:
+      name: parallel_trends
+      lookback_weeks: 8
+      min_p_value: 0.05
+  confounder_screen:
+    test_id: 6
+    name: Confounder screen
+    type: cap
+    method: screen_causal_graph_confounders
+    weight: null
+
+# --------------------------------------------------------------------------
+# Reliability weights — CLAUDE.md "Reliability weights for evidence"
+#
+# Evidence.reliability is a required field with no Python default; it is
+# populated from this table. The floor rule: a hypothesis whose evidence
+# is dominated by weights below `floor` cannot be promoted to EXPLAINED,
+# which is trigger T6. Text alone never reaches a verdict; text plus a
+# matched control does.
+# --------------------------------------------------------------------------
+reliability:
+  floor: 0.60
+  weights:
+    structured_query: 0.95
+    derived_estimate: 0.85
+    corroborated_unstructured: 0.80
+    ticket_aggregate: 0.75
+    store_note: 0.55
+    news_item: 0.45
+    social_mention: 0.35
+  corroboration:
+    min_independent_notes: 20
+    promotes_from: store_note
+    promotes_to: corroborated_unstructured
+
+# --------------------------------------------------------------------------
+# Pipeline gates.
+#
+# OPEN ITEM: CLAUDE.md refers to "Gates 1-5" and names the effect of Gate 1
+# (DATA_INCIDENT) and Gate 3 (INSUFFICIENT_HISTORY) but never enumerates
+# all five. Gates 2, 4 and 5 below are this file's proposal, not a
+# transcription — confirm them before the engine depends on them.
+# --------------------------------------------------------------------------
+gates:
+  1:
+    name: Data completeness
+    outcome_code: DATA_INCIDENT
+    max_missing_feed_share: 0.05
+    proposed: false
+  2:
+    name: Materiality
+    outcome_code: IMMATERIAL
+    proposed: true
+  3:
+    name: History sufficiency
+    outcome_code: INSUFFICIENT_HISTORY
+    proposed: false
+  4:
+    name: Authorisation
+    outcome_code: NOT_AUTHORISED
+    proposed: true
+  5:
+    name: Persistence
+    outcome_code: NOT_PERSISTENT
+    proposed: true

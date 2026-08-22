@@ -1,0 +1,66 @@
+# Availability recovery — the action attached to case #2451.
+
+playbook: availability_recovery
+version: 1
+
+driver: stock_out
+lever: expedited_replenishment
+
+action: |
+  Expedite replenishment of the affected top-selling SKUs into the
+  treated stores, bypassing the standard weekly allocation cycle, and
+  hold the expedited cadence until availability returns to its
+  pre-incident band for two consecutive weeks.
+
+  Pair it with a call-down to the affected store managers so the shelf is
+  actually reset when stock lands — expedited stock sitting in the back
+  room recovers nothing.
+
+cost_model:
+  type: per_store_unit_cost
+  unit: store
+  scales_with: treated_store_count
+  unit_cost_inr: 53000
+  fixed_cost_inr: 0
+  currency: INR
+  note: >
+    Freight premium plus handling for one store for the duration of the
+    expedited cadence. Multiplied by the number of treated stores the
+    case identifies — the playbook supplies the rate, the case supplies
+    the count.
+
+lead_time:
+  value: 5
+  unit: days
+  note: First expedited delivery lands within five working days of sign-off.
+
+owner_role: supply_chain_director
+
+recovery_curve_ref: availability_restock
+
+monitoring_plan:
+  primary_kpi: on_shelf_availability
+  secondary_kpis: [net_revenue, transactions]
+  cadence: daily
+  horizon_weeks: 8
+  checkpoints:
+    - at_week: 1
+      expect: Availability in treated stores recovers at least half the observed gap.
+    - at_week: 4
+      expect: Availability inside the pre-incident band; revenue residual narrowing.
+    - at_week: 8
+      expect: Recovery share falls inside the curve's p25-p75 range.
+  kill_criterion: >
+    If availability has not recovered half the gap by week 2, the
+    constraint is upstream of store replenishment. Stop paying the
+    freight premium and escalate to the linked case.
+  escalation_role: retail_operations_lead
+
+linked_case_template:
+  driver: transport_disruption
+  question: >
+    Why did the allocation logic under-serve these stores in the first
+    place? Expedited freight treats the symptom for eight weeks; the
+    allocation rule that starved them will do it again next cycle.
+  scope_hint: distribution_centre
+  rationale: the cause of the cause

@@ -1,0 +1,154 @@
+# Net revenue — the KPI behind case #2451.
+#
+# Every threshold in this file is authoritative. Nothing here may be
+# duplicated into engine/ (CLAUDE.md rule 2).
+
+kpi: net_revenue
+version: 1
+display_name: Net Revenue
+unit: INR_CR
+owner_role: finance_controller
+
+definition: |
+  Revenue recognised at the store till, net of returns, discounts and tax.
+
+  Scope exclusions are part of the definition, not a filter applied later:
+    - channel = 'B2B' is EXCLUDED. Wholesale orders settle on different
+      terms and would swamp store-level movement.
+    - txn_type = 'TRANSFER' is EXCLUDED. Inter-store stock transfers are
+      not sales and would double-count.
+
+  Netting: gross_amount less returns_amount, less discount_amount, less
+  tax_amount. Returns are netted against the period in which the return
+  was processed, not the original sale, which is why the restatement
+  window is non-zero.
+
+formula_sql: |
+  SELECT
+      d.region,
+      d.store_id,
+      DATE_TRUNC(:grain, f.txn_date) AS period,
+      SUM(f.gross_amount
+          - f.returns_amount
+          - f.discount_amount
+          - f.tax_amount) / 1e7 AS net_revenue_inr_cr
+  FROM fact_sales AS f
+  JOIN dim_store AS d USING (store_id)
+  WHERE f.channel <> 'B2B'
+    AND f.txn_type <> 'TRANSFER'
+    AND f.txn_date >= :period_start
+    AND f.txn_date <  :period_end
+  GROUP BY 1, 2, 3
+
+grain:
+  supported: [daily, weekly, monthly]
+  default: monthly
+
+dimensions:
+  - region
+  - city
+  - store_id
+  - store_format
+  - channel
+  - category
+  - sub_category
+  - sku
+
+source_systems:
+  - name: pos
+    description: Point-of-sale transaction log
+    tables: [fact_sales]
+    reliability_tier: structured_query
+  - name: erp
+    description: Store and organisation master data
+    tables: [dim_store, dim_sku]
+    reliability_tier: structured_query
+  - name: returns
+    description: Returns and refunds ledger
+    tables: [fact_returns]
+    reliability_tier: structured_query
+
+refresh:
+  cadence: daily
+  time_ist: "02:30"
+  sla_hours: 6
+  restatement_window_days: 7
+
+thresholds:
+  materiality:
+    value: 0.50
+    unit: INR_CR
+    display: "₹50 L"
+    note: >
+      A residual below this is not worth a case. This is the number that
+      forces #2451 to PARTIALLY EXPLAINED rather than EXPLAINED.
+  statistical_method: residual_quantile_band
+  band_lookback_weeks: 8
+  band_quantile: 0.90
+  persistence_periods: 2
+  min_relative_movement_pct: 2.0
+
+baseline:
+  method: stl_plus_calendar_regression
+  min_history_weeks: 26
+  seasonal_period_days: 7
+  calendar_regressors:
+    - festival_window
+    - weekend
+    - month_end
+    - payday
+    - public_holiday
+
+history_weeks: 78
+
+drivers:
+  - transactions
+  - avg_selling_price
+  - on_shelf_availability
+  - conversion_rate
+
+related_kpis:
+  - transactions
+  - conversion_rate
+  - avg_selling_price
+
+lineage_stages:
+  - stage: ingest
+    description: POS transaction files land in raw storage
+    produces: raw.pos_txn
+  - stage: conform
+    description: Join to store and SKU masters, apply scope exclusions
+    produces: fact_sales
+  - stage: aggregate
+    description: Net off returns, discount and tax; roll to the requested grain
+    produces: agg.net_revenue
+  - stage: decompose
+    description: STL plus calendar regression to split expected from residual
+    produces: agg.net_revenue_residual
+
+access_policy:
+  default_persona: analyst
+  personas:
+    cxo:
+      row_predicate: "TRUE"
+      masked_columns: []
+    finance_controller:
+      row_predicate: "TRUE"
+      masked_columns: []
+    regional_manager:
+      row_predicate: "region = :user_region"
+      masked_columns: [staff_cost, staff_headcount]
+    store_manager:
+      row_predicate: "store_id = :user_store_id"
+      masked_columns: [staff_cost, staff_headcount, margin_pct]
+    analyst:
+      row_predicate: "TRUE"
+      masked_columns: [customer_phone, customer_email, staff_cost]
+
+confidence_rules:
+  required_sources: [pos, erp]
+  min_source_reliability: 0.60
+  freshness_full_credit_hours: 24
+  freshness_zero_credit_hours: 96
+  regime_change_penalty: 0.15
+  publication_floor: 0.70

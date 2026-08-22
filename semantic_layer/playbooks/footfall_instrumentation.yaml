@@ -1,0 +1,72 @@
+# Footfall instrumentation — the second resolution path offered by #2467.
+#
+# Like competitor_intelligence, this buys information rather than
+# recovery, and carries the null recovery curve.
+
+playbook: footfall_instrumentation
+version: 1
+
+driver: footfall_decline
+lever: acquire_missing_source
+
+action: |
+  Install door-sensor footfall counters in the uninstrumented stores in
+  scope, and run a two-week overlap against manual counts before the
+  feed is trusted.
+
+  Without the overlap the new counters cannot be compared to the existing
+  estate, and a step change in measured footfall on the install date
+  becomes indistinguishable from a real movement — an instrumentation
+  change that manufactures its own data incident.
+
+cost_model:
+  type: per_store_unit_cost
+  unit: store
+  scales_with: uninstrumented_store_count
+  unit_cost_inr: 11000
+  fixed_cost_inr: 0
+  currency: INR
+  note: >
+    Hardware, installation and first-year connectivity for one store.
+    Multiplied by the number of uninstrumented stores in the case scope.
+
+lead_time:
+  value: 6
+  unit: weeks
+  note: >
+    Procurement, phased installation and the two-week measurement
+    overlap before the feed is usable.
+
+owner_role: retail_operations_lead
+
+recovery_curve_ref: instrumentation_none
+
+monitoring_plan:
+  primary_kpi: conversion_rate
+  secondary_kpis: [transactions, net_revenue]
+  cadence: weekly
+  horizon_weeks: 26
+  checkpoints:
+    - at_week: 4
+      expect: Installation complete; manual-count overlap running.
+    - at_week: 6
+      expect: >
+        Overlap reconciles within tolerance and the new counters join the
+        conversion_rate denominator.
+    - at_week: 26
+      expect: >
+        Instrumented share of the estate is high enough that a footfall
+        hypothesis can be tested on the full scope rather than a subset.
+  kill_criterion: >
+    If the manual-count overlap does not reconcile, do not admit the new
+    counters to the denominator. A biased counter is worse than no
+    counter, because it looks like data.
+  escalation_role: cxo
+
+linked_case_template:
+  driver: footfall_decline
+  question: >
+    Re-open the abstained case once instrumented coverage is high enough
+    for the footfall hypothesis to be tested on the whole scope.
+  scope_hint: same_as_originating_case
+  rationale: resolution of a named unknown

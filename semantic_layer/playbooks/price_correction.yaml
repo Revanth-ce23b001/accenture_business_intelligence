@@ -1,0 +1,85 @@
+# Price correction.
+#
+# The playbook most likely to be reached for and least likely to be
+# right. #2467 recommends explicitly AGAINST it: a price response there
+# would put a large margin pool at risk on a hypothesis that is close to a
+# coin flip. That refusal is a feature of this playbook, not an exception
+# to it — see `preconditions`.
+
+playbook: price_correction
+version: 1
+
+driver: price_increase
+lever: price_rollback
+
+action: |
+  Roll back or soften the price increase on the affected sub-categories,
+  and hold the corrected price for a full purchase cycle before judging
+  the result.
+
+  Communicate the correction at shelf. An unannounced rollback recovers
+  volume slowly, because the shoppers who left are not in the store to
+  notice the new price.
+
+preconditions:
+  rules:
+    - The price event is confirmed in the pricing log, not inferred from ASP movement.
+    - Temporal precedence passed — the price change preceded the decline.
+    - The mix-adjusted price effect, not blended ASP, clears materiality.
+    - No live competing hypothesis holds more residual than this one.
+  note: >
+    All four must hold. Margin given away against an unconfirmed price
+    hypothesis is unrecoverable, which is why this playbook refuses to
+    fire on a hypothesis that merely correlates.
+
+cost_model:
+  type: margin_forgone
+  unit: percent_of_affected_revenue
+  scales_with: affected_revenue
+  unit_cost_inr: null
+  fixed_cost_inr: 0
+  currency: INR
+  depth_source: observed_price_increase
+  note: >
+    Cost is the margin given up: the rollback depth applied to the
+    affected revenue the case identifies. The depth is NOT a playbook
+    constant — it comes from the price increase the case actually
+    observed in the pricing log. There is no per-store rate; exposure
+    scales with revenue, not store count, which is what makes this lever
+    expensive at regional scope.
+
+lead_time:
+  value: 3
+  unit: days
+  note: Price file update and shelf-label refresh.
+
+owner_role: category_director
+
+recovery_curve_ref: price_rollback
+
+monitoring_plan:
+  primary_kpi: transactions
+  secondary_kpis: [net_revenue, avg_selling_price, conversion_rate]
+  cadence: weekly
+  horizon_weeks: 12
+  checkpoints:
+    - at_week: 2
+      expect: Mix-adjusted ASP back at the pre-increase level.
+    - at_week: 6
+      expect: Transaction volume recovering toward the counterfactual.
+    - at_week: 12
+      expect: Recovery share inside the curve's p25-p75 range.
+  kill_criterion: >
+    If volume has not moved by week 6 while margin is being given away
+    every week, the hypothesis was wrong. Restore the price and re-open
+    the case rather than deepening the rollback.
+  escalation_role: finance_controller
+
+linked_case_template:
+  driver: competitor_action
+  question: >
+    Did the price increase only bite because a competitor held their
+    price? If so the lever is competitive positioning, not absolute
+    price, and the rollback is over-correcting.
+  scope_hint: same_as_originating_case
+  rationale: the cause of the cause
