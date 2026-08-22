@@ -55,7 +55,10 @@ packages = [
 # Repo root on sys.path so `make test` works without an editable install.
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not slow'"
+markers = [
+  "slow: full-world regeneration; run with -m slow",
+]
 
 [tool.ruff]
 line-length = 100

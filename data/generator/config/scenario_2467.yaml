@@ -1,0 +1,63 @@
+# Case #2467 — East, conversion rate, Oct 2025 (monthly) -> INSUFFICIENT EVIDENCE
+#
+# This case abstains on EVIDENCE, not on materiality. The residual clears
+# the 0.5 pt limit comfortably. What stops it is that the leading
+# hypothesis needs two sources the organisation does not hold, a second
+# hypothesis is indistinguishable from it on what IS held, and the
+# historical calibration for this case type sits below the publication
+# floor.
+
+case_id: "2467"
+scope: East
+kpi: conversion_rate
+grain: monthly
+period: "2025-10"
+comparison_period: "2025-09"
+
+targets:
+  east_net_revenue_monthly_inr_cr: 34.5
+  east_store_count: 58
+  conversion_before_pt: 22.0
+  conversion_after_pt: 19.6
+  headline_movement_pt: -2.4
+  calendar_and_mix_attributed_pt: -1.2
+  qualified_residual_pt: -1.2
+  qualified_residual_revenue_equivalent_inr_cr: 1.88
+  materiality_pt: 0.5
+
+evidence:
+  marketing_feed_staleness_hours: 74
+  competitor_news_items: 3
+  competitor_review_mentions: 14
+  road_closures_in_notes: 2
+  # NOTE: CLAUDE.md reads "footfall counters in 31 of 140 stores only" for
+  # this EAST case, but East has 58 stores and 140 is West's count. The
+  # generator emits East's own instrumented share and records the West
+  # figure separately. Reported, not silently reconciled.
+  footfall_counters_claimed_numerator: 31
+  footfall_counters_claimed_denominator: 140
+
+calibration:
+  competitor_attribution_accuracy: 0.58
+  competitor_attribution_sample: 12
+  publication_floor: 0.70
+
+triggers_expected: [T3, T4, T7]
+
+verdict:
+  value: INSUFFICIENT_EVIDENCE
+
+resolution_ranked_by_value_per_rupee:
+  - playbook: call_down
+    effort: 9 managers, ~2 hours
+  - playbook: competitor_intelligence
+    cost_inr_l_per_year: 4
+    lead_time_weeks: 2
+  - playbook: footfall_instrumentation
+    cost_inr_l: 12
+    lead_time_weeks: 6
+
+explicitly_not_recommended:
+  action: price response
+  margin_at_risk_inr_cr: 1.2
+  chance_of_being_wrong: 0.50

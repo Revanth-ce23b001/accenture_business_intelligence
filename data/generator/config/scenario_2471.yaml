@@ -1,0 +1,30 @@
+# Case #2471 — All-India, Q-commerce fulfilment, Nov 2025 (weekly) -> Gate 3
+#
+# The KPI launched seven weeks ago. Twenty-six weekly points are required
+# before a baseline means anything. Monitoring only; no case opened.
+#
+# The gate fires from the semantic layer, not from here:
+#   qcomm_fulfilment_rate.history_weeks = 7
+#   qcomm_fulfilment_rate.baseline.min_history_weeks = 26
+
+case_id: "2471"
+scope: All-India
+kpi: qcomm_fulfilment_rate
+grain: weekly
+period: "2025-11"
+
+targets:
+  weekly_points_available: 7
+  weekly_points_required: 26
+  launch_date: "2025-10-13"
+
+gate:
+  gate_id: 3
+  outcome_code: INSUFFICIENT_HISTORY
+  case_opened: false
+  monitoring_only: true
+
+series:
+  fulfilment_rate_base_pct: 91.5
+  weekly_noise_sigma: 0.021
+  dark_stores: 46

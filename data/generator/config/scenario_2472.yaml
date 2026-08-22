@@ -1,0 +1,26 @@
+# Case #2472 — South, net revenue, Sep 2025 (monthly) -> CASE OPENED
+#
+# The subtle one. South is FLAT at 0.0% month on month, which looks fine
+# on a dashboard. It is not fine: Ganesh Chaturthi fell in September and
+# the calendar model expected +12%. Flat against an expected rise is a
+# -12 pt residual.
+#
+# This is the scenario that shows why a residual, not a headline, opens a
+# case. Adjudication is left in_progress deliberately.
+
+case_id: "2472"
+scope: South
+kpi: net_revenue
+grain: monthly
+period: "2025-09"
+comparison_period: "2025-08"
+
+targets:
+  headline_movement_pct: 0.0
+  calendar_expected_movement_pct: 12.0
+  qualified_residual_pt: -12.0
+  festival: Ganesh Chaturthi
+
+gate:
+  case_opened: true
+  adjudication_status: in_progress
