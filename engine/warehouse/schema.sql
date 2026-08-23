@@ -71,7 +71,30 @@ CREATE TABLE IF NOT EXISTS dim_calendar (
     is_month_end       BOOLEAN NOT NULL,
     is_payday          BOOLEAN NOT NULL,
     festival           VARCHAR,
-    is_festival        BOOLEAN NOT NULL
+    is_festival        BOOLEAN NOT NULL,
+    -- Meridian's own scheduled sales. A promo window is a calendar event,
+    -- not a spend level: Gate 2's baseline may use this and must never use
+    -- marketing spend, or a spend cut would hide inside "calendar-expected".
+    promo_window       VARCHAR,
+    is_promo_window    BOOLEAN NOT NULL
+);
+
+-- Festival membership, properly. `dim_calendar.festival` holds one label
+-- per day and festivals OVERLAP — Onam with Ganesh Chaturthi in South,
+-- Navratri with Durga Puja in East — so a single label silently drops the
+-- second one and a calendar model built on it cannot fit either.
+--
+-- `day_index` over `phase_days` says where in the ramp a day falls, and
+-- `phase` separates the window from the seven days of suppressed demand
+-- after it. Gate 2 needs both: a festival is not a switch.
+CREATE TABLE IF NOT EXISTS dim_festival_window (
+    date        DATE    NOT NULL,
+    festival    VARCHAR NOT NULL,
+    occurrence  VARCHAR NOT NULL,
+    phase       VARCHAR NOT NULL,
+    day_index   INTEGER NOT NULL,
+    phase_days  INTEGER NOT NULL,
+    PRIMARY KEY (date, festival, phase)
 );
 
 -- The bridge between the POS key and the operations key, and the only one.
@@ -309,6 +332,11 @@ CREATE TABLE IF NOT EXISTS case_registry (
     verdict                VARCHAR,
     reason_code            VARCHAR,
     reason_text            VARCHAR,
+    -- How many times its own materiality limit the qualified residual is.
+    -- Written by QUALIFY when the case opens. It is what ranks one case
+    -- against another, and what tells restraint whether a later movement
+    -- on the same scope is an escalation or a repeat.
+    materiality_multiple   DOUBLE,
     coverage               DOUBLE,
     confidence_raw         DOUBLE,
     confidence_calibrated  DOUBLE,
@@ -336,6 +364,20 @@ CREATE TABLE IF NOT EXISTS case_hypothesis (
 -- Every number the UI shows resolves to a row here (CLAUDE.md rule 3).
 -- `value_numeric` is NULL for model-produced records: rule 1 forbids the
 -- model from being the source of a number.
+--
+-- Four columns are NOT NULL because a row missing any of them is a number
+-- that cannot be chased:
+--
+--   source_system   where it came from
+--   method          how it was made
+--   source_as_of    how current the DATA is. Not when it was read —
+--                   `retrieved_at` is that, and it is kept separately so
+--                   the two can never be confused. A stale feed shown with
+--                   today's date beside it reads as fresh.
+--   lineage_json    what it was derived from, in order, with any SQL kept
+--                   VERBATIM rather than hashed. audit_log stores a hash
+--                   because it is a different table with different access
+--                   rules; the statement travels with the number here.
 CREATE TABLE IF NOT EXISTS evidence (
     evidence_id      VARCHAR PRIMARY KEY,
     case_id          VARCHAR,
@@ -346,12 +388,15 @@ CREATE TABLE IF NOT EXISTS evidence (
     value_text       VARCHAR,
     unit             VARCHAR,
     reliability      DOUBLE  NOT NULL,
+    source_system    VARCHAR NOT NULL,
+    method           VARCHAR NOT NULL,
     source_ref       VARCHAR NOT NULL,
-    as_of            TIMESTAMP NOT NULL,
+    source_as_of     TIMESTAMP NOT NULL,
+    retrieved_at     TIMESTAMP,
     freshness_hours  DOUBLE  NOT NULL,
     completeness     DOUBLE  NOT NULL,
     assumptions      VARCHAR,
-    lineage_json     VARCHAR,
+    lineage_json     VARCHAR NOT NULL,
     notes            VARCHAR
 );
 

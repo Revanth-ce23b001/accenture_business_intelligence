@@ -29,8 +29,13 @@ SELECT CAST(date AS DATE), year, month, day, dow,
        fiscal_year, fiscal_year_label, fiscal_quarter,
        fiscal_week, CAST(fiscal_week_start AS DATE),
        is_weekend, is_month_end, is_payday,
-       NULLIF(CAST(festival AS VARCHAR), ''), is_festival
+       NULLIF(CAST(festival AS VARCHAR), ''), is_festival,
+       NULLIF(CAST(promo_window AS VARCHAR), ''), is_promo_window
 FROM read_csv_auto('{raw}/context/calendar.csv');
+
+INSERT INTO dim_festival_window
+SELECT CAST(date AS DATE), festival, occurrence, phase, day_index, phase_days
+FROM read_csv_auto('{raw}/context/festival_windows.csv');
 
 INSERT INTO dim_store_xref
 SELECT store_code, outlet_id,

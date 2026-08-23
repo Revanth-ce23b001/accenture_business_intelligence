@@ -41,6 +41,7 @@ def make_lineage_step(step: int = 0) -> LineageStep:
         description="Sum net revenue by region and month.",
         inputs=("src.sales_daily",),
         ref="semantic_layer/kpis/net_revenue.yaml",
+        statement="SELECT region, SUM(net_revenue_inr) FROM fact_sales_daily GROUP BY 1",
     )
 
 
@@ -53,8 +54,11 @@ def make_evidence(evidence_id: str = "ev.001", **overrides) -> Evidence:
         value=0.0,
         unit="INR_CR",
         reliability=0.95,
+        source_system="pos",
+        method="sql",
         source_ref="q.net_revenue_by_region_month",
-        as_of=FIXED_TS,
+        source_as_of=FIXED_TS,
+        retrieved_at=FIXED_TS,
         freshness_hours=1.5,
         completeness=1.0,
         lineage=(make_lineage_step(),),

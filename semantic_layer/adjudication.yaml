@@ -238,6 +238,21 @@ reliability:
 # all five. Gates 2, 4 and 5 below are this file's proposal, not a
 # transcription — confirm them before the engine depends on them.
 # --------------------------------------------------------------------------
+# CLAUDE.md refers to "Gates 1-5" and names only two of them: Gate 1
+# (DATA_INCIDENT, case #2470) and Gate 3 (INSUFFICIENT_HISTORY, case
+# #2471). At P2 the other three were guessed and flagged `proposed: true`
+# so they could be replaced without pretending they had ever been
+# specified. P5 and P6 specified them, and this is the resulting map.
+#
+# Gates 2 and 3 both still honour the two CLAUDE.md names. What changed is
+# that materiality moved from gate 2 to gate 5, and authorisation and
+# persistence turned out not to be gates at all: authorisation happens
+# before retrieval on every query (rule 5), and persistence is a threshold
+# inside the KPI contract rather than a stage of its own.
+#
+# Each gate's own configuration lives with the stage that runs it:
+# validate.yaml for gate 1, qualify.yaml for gates 2 to 5. This map exists
+# so the numbering has one home and cannot drift between them.
 gates:
   1:
     name: Data completeness
@@ -245,18 +260,18 @@ gates:
     max_missing_feed_share: 0.05
     proposed: false
   2:
-    name: Materiality
-    outcome_code: IMMATERIAL
-    proposed: true
+    name: Calendar decomposition
+    outcome_code: CALENDAR_MODEL_UNFIT
+    proposed: false
   3:
-    name: History sufficiency
+    name: History and residual band
     outcome_code: INSUFFICIENT_HISTORY
     proposed: false
   4:
-    name: Authorisation
-    outcome_code: NOT_AUTHORISED
-    proposed: true
+    name: Specificity
+    outcome_code: MARKET_CASE
+    proposed: false
   5:
-    name: Persistence
-    outcome_code: NOT_PERSISTENT
-    proposed: true
+    name: Materiality
+    outcome_code: IMMATERIAL
+    proposed: false

@@ -556,6 +556,8 @@ class Units(_Node):
     percent_scale: float = Field(gt=0.0)
     crore_places: int = Field(ge=0)
     pct_places: int = Field(ge=0)
+    days_per_week: int = Field(gt=0)
+    days_per_year: float = Field(gt=0.0)
 
 
 class Governance(_Node):
@@ -742,7 +744,11 @@ class SourceLocation(_Node):
 
     table: str = Field(min_length=1)
     date_column: str | None = None
+    grain: Literal["daily", "weekly", "static"]
     scope_join: Literal["region", "store_id", "none"]
+    #: Set when the table names its own scope instead of carrying a region,
+    #: as `fact_qcomm_weekly` does with All-India.
+    scope_column: str | None = None
     description: str = Field(min_length=1)
 
     @property
@@ -750,12 +756,38 @@ class SourceLocation(_Node):
         return self.date_column is None
 
 
+class EvidenceVocabulary(_Node):
+    """What an `Evidence` record is allowed to say about itself.
+
+    Closed sets, so a typo fails at load rather than becoming an
+    unqueryable string in the `evidence` table.
+    """
+
+    non_source_origins: dict[str, str] = Field(min_length=1)
+    methods: dict[str, str] = Field(min_length=1)
+
+
 class WarehouseConfig(_Node):
     version: int = Field(ge=1)
     units: Units
     governance: Governance
     sources: dict[str, SourceLocation] = Field(min_length=1)
+    evidence: EvidenceVocabulary
     reconciliation: Reconciliation
+
+    def known_origins(self) -> frozenset[str]:
+        """Every value `Evidence.source_system` may take."""
+        return frozenset(self.sources) | frozenset(self.evidence.non_source_origins)
+
+    @model_validator(mode="after")
+    def _origins_do_not_collide_with_sources(self) -> WarehouseConfig:
+        clash = set(self.sources) & set(self.evidence.non_source_origins)
+        if clash:
+            raise ValueError(
+                f"{sorted(clash)} is both a source system and a non-source origin; "
+                "an evidence record could not say which it meant"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +893,153 @@ class ValidateConfig(_Node):
 
 
 # ---------------------------------------------------------------------------
+# QUALIFY — Gates 2 to 5, and restraint
+# ---------------------------------------------------------------------------
+
+
+class CalendarRegressors(_Node):
+    """What the calendar baseline is allowed to know about.
+
+    Marketing SPEND is deliberately absent and must stay absent: a spend
+    cut absorbed into "calendar-expected" could never be eliminated on
+    precedence, which is exactly what case #2451 turns on.
+    """
+
+    day_of_week: bool
+    trading_days: Literal["by_construction"]
+    trend: bool
+    annual_harmonics: int = Field(ge=0)
+    pay_cycle: bool
+    month_end: bool
+    promo_window: bool
+    festival_window_segments: int = Field(gt=0)
+    festival_hangover_days: int = Field(ge=0)
+    festival_hangover_segments: int = Field(gt=0)
+
+
+class AnomalyExclusion(_Node):
+    method: Literal["monthly_mean_residual"]
+    sigma: float = Field(gt=0.0)
+
+
+class CalendarModelSpec(_Node):
+    estimator: Literal["ols"]
+    target_transform: Literal["log", "identity"]
+    requested_history_years: int = Field(gt=0)
+    min_fit_days: int = Field(gt=0)
+    exclude_period_under_test: bool
+    regressors: CalendarRegressors
+    anomaly_exclusion: AnomalyExclusion
+
+
+class DecompositionSpec(_Node):
+    denominator: Literal["actual_previous_period", "predicted_previous_period"]
+    emit_previous_period_fit: bool
+    #: headline = calendar + residual holds by construction. This is the
+    #: arithmetic tolerance it is checked to, not a business one.
+    reconciliation_tolerance_pt: float = Field(gt=0.0)
+
+
+class CalendarGate(_Node):
+    gate_id: int = Field(ge=1, le=5)
+    name: str
+    outcome_code: str
+    model: CalendarModelSpec
+    decomposition: DecompositionSpec
+
+
+class HistorySpec(_Node):
+    source: Literal["observed_periods"]
+    min_from: str
+
+
+class StlSpec(_Node):
+    period: int = Field(gt=1)
+    robust: bool
+    input: Literal["calendar_residual", "raw"]
+
+
+class BandGate(_Node):
+    gate_id: int = Field(ge=1, le=5)
+    name: str
+    history_outcome_code: str
+    within_band_outcome_code: str
+    history: HistorySpec
+    method: Literal["stl_residual_empirical_quantile"]
+    stl: StlSpec
+    min_band_observations: int = Field(gt=0)
+
+
+class SpecificityGate(_Node):
+    gate_id: int = Field(ge=1, le=5)
+    name: str
+    outcome_code: str
+    peer_dimension: str
+    min_peers_breaching: int = Field(gt=0)
+    same_direction_required: bool
+    escalate_to_role: str
+    unknown_outcome_code: str
+
+
+class MaterialityGate(_Node):
+    gate_id: int = Field(ge=1, le=5)
+    name: str
+    outcome_code: str
+    threshold_from: str
+    sub_threshold_route: str
+
+
+class DeduplicationSpec(_Node):
+    enabled: bool
+    link_via: list[str] = Field(min_length=1)
+    require_same_scope: bool
+    require_same_period: bool
+    outcome_code: str
+    keep: Literal["largest_relative_to_materiality"]
+
+
+class SuppressionSpec(_Node):
+    enabled: bool
+    window_days: int = Field(gt=0)
+    outcome_code: str
+    escalation_multiple: float = Field(gt=1.0)
+
+
+class OwnerLoadSpec(_Node):
+    enabled: bool
+    max_open_cases_per_owner_per_week: int = Field(gt=0)
+    owner_from: str
+    window: Literal["iso_week"]
+    outcome_code: str
+    over_cap_route: str
+
+
+class RestraintSpec(_Node):
+    deduplication: DeduplicationSpec
+    suppression: SuppressionSpec
+    owner_load: OwnerLoadSpec
+
+
+class QualifyConfig(_Node):
+    version: int = Field(ge=1)
+    calendar: CalendarGate
+    band: BandGate
+    specificity: SpecificityGate
+    materiality: MaterialityGate
+    restraint: RestraintSpec
+
+    def gate_ids(self) -> list[int]:
+        return sorted(
+            {
+                self.calendar.gate_id,
+                self.band.gate_id,
+                self.specificity.gate_id,
+                self.materiality.gate_id,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
 # The whole layer
 # ---------------------------------------------------------------------------
 
@@ -875,6 +1054,7 @@ class SemanticLayer(_Node):
     #: `validate.yaml`, named `validation` here because a field called
     #: `validate` shadows a BaseModel method and pydantic warns about it.
     validation: ValidateConfig
+    qualify: QualifyConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -965,6 +1145,34 @@ class SemanticLayer(_Node):
                 f"gate {gate_id} is {declared.outcome_code!r} in adjudication.yaml and "
                 f"{self.validation.outcome_code!r} in validate.yaml"
             )
+
+        # The gate map in adjudication.yaml is the single home for the
+        # numbering; the stages carry the configuration. They must agree on
+        # both the number and the headline outcome code, or a kill chip
+        # would name a gate the map calls something else.
+        staged = {
+            self.qualify.calendar.gate_id: self.qualify.calendar.outcome_code,
+            self.qualify.band.gate_id: self.qualify.band.history_outcome_code,
+            self.qualify.specificity.gate_id: self.qualify.specificity.outcome_code,
+            self.qualify.materiality.gate_id: self.qualify.materiality.outcome_code,
+            self.validation.gate_id: self.validation.outcome_code,
+        }
+        if len(staged) != len(self.qualify.gate_ids()) + 1:
+            raise ValueError(
+                "two stages claim the same gate number across validate.yaml and "
+                "qualify.yaml"
+            )
+        for gate_id, code in sorted(staged.items()):
+            if gate_id not in self.adjudication.gates:
+                raise ValueError(
+                    f"a stage declares gate {gate_id}, which adjudication.yaml does not"
+                )
+            declared = self.adjudication.gates[gate_id].outcome_code
+            if declared != code:
+                raise ValueError(
+                    f"gate {gate_id} is {declared!r} in adjudication.yaml and {code!r} "
+                    "in the stage that runs it"
+                )
 
         conflict = self.warehouse.reconciliation.definition_conflict
         if conflict.kpi not in kpi_names:
@@ -1063,6 +1271,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     adjudication_path = base / "adjudication.yaml"
     warehouse_path = base / "warehouse.yaml"
     validate_path = base / "validate.yaml"
+    qualify_path = base / "qualify.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -1074,6 +1283,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
         ),
         "warehouse": _build(WarehouseConfig, _read_yaml(warehouse_path), warehouse_path),
         "validation": _build(ValidateConfig, _read_yaml(validate_path), validate_path),
+        "qualify": _build(QualifyConfig, _read_yaml(qualify_path), qualify_path),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -1104,13 +1314,20 @@ __all__ = [
     "CostModel",
     "DefinitionConflict",
     "EntityKeyMismatch",
+    "EvidenceVocabulary",
     "Governance",
     "GrainMismatch",
     "HypothesisTemplate",
     "KpiContract",
     "Materiality",
+    "BandGate",
+    "CalendarGate",
+    "MaterialityGate",
     "Playbook",
+    "QualifyConfig",
     "Reconciliation",
+    "RestraintSpec",
+    "SpecificityGate",
     "Severity",
     "RecoveryCurve",
     "RecoveryCurves",

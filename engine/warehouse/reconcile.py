@@ -31,8 +31,9 @@ from typing import Any, Mapping
 
 import duckdb
 
-from engine.contracts import Evidence, LineageStep
+from engine.contracts import Evidence
 from engine.db import warehouse_clock
+from engine.evidence import EvidenceFactory
 from semantic_layer.schema import (
     CalendarMismatch,
     DefinitionConflict,
@@ -54,6 +55,12 @@ SOURCE_REF = "engine/warehouse/reconcile.py"
 #: layer, never from here.
 QUERY_KIND = "structured_query"
 DERIVED_KIND = "derived_estimate"
+
+#: `Evidence.source_system` values this module uses. Declared in
+#: semantic_layer/warehouse.yaml -> evidence.
+POS_SOURCE = "pos"
+WAREHOUSE = "warehouse"
+DERIVED = "derived"
 
 
 class ReconciliationError(RuntimeError):
@@ -300,72 +307,52 @@ def check_definition_conflict(
         )
     gap_pct = (numerator - denominator) / denominator * units.percent_scale
 
-    reliability = layer.reliability_weight(QUERY_KIND)
-    derived_reliability = layer.reliability_weight(DERIVED_KIND)
     scope_label = scope or "All-India"
+    factory = _factory(layer, as_of)
 
     evidence: list[Evidence] = []
     for name in names:
         definition = spec.definitions[name]
         evidence.append(
-            Evidence(
-                evidence_id=_eid("definition", name, scope),
+            factory.emit(
+                _key("definition", name, scope),
                 kind=QUERY_KIND,
-                produced_by="code",
                 label=f"{definition.label} — {scope_label}",
                 value=totals[name],
                 unit="INR_CR",
-                reliability=reliability,
-                source_ref=f"{SOURCE_REF}::check_definition_conflict",
-                as_of=as_of,
-                freshness_hours=0.0,
-                completeness=1.0,
-                lineage=(
-                    LineageStep(
-                        step=0,
-                        operation="sql",
-                        description=(
-                            f"{definition.expression} over {spec.fact_table}"
-                            f" — owned by {definition.owner}"
-                        ),
-                        inputs=(spec.fact_table,),
-                        ref=f"semantic_layer/warehouse.yaml::definitions.{name}",
-                    ),
+                source_system=POS_SOURCE,
+                method="sql",
+                description=(
+                    f"{definition.expression} over {spec.fact_table}"
+                    f" — owned by {definition.owner}"
                 ),
+                ref=f"semantic_layer/warehouse.yaml::definitions.{name}",
+                inputs=(spec.fact_table,),
+                statement=statement,
                 notes=definition.rationale.strip(),
             )
         )
 
     evidence.append(
-        Evidence(
-            evidence_id=_eid("definition", "gap", scope),
+        factory.emit(
+            _key("definition", "gap", scope),
             kind=DERIVED_KIND,
-            produced_by="code",
             label=(
                 f"{spec.definitions[spec.gap.numerator].label} exceeds "
                 f"{spec.definitions[spec.gap.denominator].label} — {scope_label}"
             ),
             value=round(gap_pct, units.pct_places),
             unit=spec.gap.unit,
-            reliability=derived_reliability,
-            source_ref=f"{SOURCE_REF}::check_definition_conflict",
-            as_of=as_of,
-            freshness_hours=0.0,
-            completeness=1.0,
-            lineage=(
-                LineageStep(
-                    step=0,
-                    operation="ratio",
-                    description=(
-                        f"({spec.gap.numerator} - {spec.gap.denominator}) / "
-                        f"{spec.gap.denominator}"
-                    ),
-                    inputs=(
-                        _eid("definition", spec.gap.numerator, scope),
-                        _eid("definition", spec.gap.denominator, scope),
-                    ),
-                    ref="semantic_layer/warehouse.yaml::definition_conflict.gap",
-                ),
+            source_system=DERIVED,
+            method="ratio",
+            description=(
+                f"({spec.gap.numerator} - {spec.gap.denominator}) / "
+                f"{spec.gap.denominator}"
+            ),
+            ref="semantic_layer/warehouse.yaml::definition_conflict.gap",
+            inputs=(
+                _eid("definition", spec.gap.numerator, scope),
+                _eid("definition", spec.gap.denominator, scope),
             ),
             notes=(
                 f"Neither figure is wrong. {spec.definitions[spec.arbiter].label} is the "
@@ -425,9 +412,7 @@ def check_entity_keys(
     spec: EntityKeyMismatch = layer.warehouse.reconciliation.entity_key_mismatch
     units = layer.warehouse.units
 
-    row = _one(
-        connection,
-        f"""
+    statement = f"""
         SELECT
             COUNT(*)                                          AS total_rows,
             SUM(CASE WHEN x."{spec.ops_key}" IS NULL THEN 1 ELSE 0 END) AS unmapped_rows,
@@ -437,8 +422,8 @@ def check_entity_keys(
         FROM "{spec.fact_table}" AS f
         LEFT JOIN "{spec.bridge_table}" AS x
                ON f."{spec.pos_key}" = x."{spec.pos_key}"
-        """,
-    )
+    """
+    row = _one(connection, statement)
 
     keys = tuple(
         str(record[0])
@@ -460,54 +445,45 @@ def check_entity_keys(
     quarantined = _crore(float(row["unmapped_measure"]), units)
     share = quarantined / total if total else 0.0
 
-    reliability = layer.reliability_weight(QUERY_KIND)
+    factory = _factory(layer, as_of)
     completeness = (total_rows - unmapped_rows) / total_rows if total_rows else 0.0
     common = dict(
-        kind=QUERY_KIND,
-        produced_by="code",
-        reliability=reliability,
-        source_ref=f"{SOURCE_REF}::check_entity_keys",
-        as_of=as_of,
-        freshness_hours=0.0,
-        completeness=completeness,
-    )
-    lineage = (
-        LineageStep(
-            step=0,
-            operation="sql",
-            description=(
-                f"LEFT JOIN {spec.fact_table} to {spec.bridge_table} on {spec.pos_key}; "
-                f"rows with no {spec.ops_key} are quarantined"
-            ),
-            inputs=(spec.fact_table, spec.bridge_table),
-            ref="engine/warehouse/views.sql::v_sales_daily_quarantined",
+        source_system=POS_SOURCE,
+        method="sql",
+        description=(
+            f"LEFT JOIN {spec.fact_table} to {spec.bridge_table} on {spec.pos_key}; "
+            f"rows with no {spec.ops_key} are quarantined"
         ),
+        ref="engine/warehouse/views.sql::v_sales_daily_quarantined",
+        inputs=(spec.fact_table, spec.bridge_table),
+        statement=statement,
+        completeness=completeness,
     )
 
     evidence = (
-        Evidence(
-            evidence_id=_eid("keys", "unmapped_count"),
+        factory.emit(
+            _key("keys", "unmapped_count"),
+            kind=QUERY_KIND,
             label=f"POS {spec.pos_key} values with no row in {spec.bridge_table}",
             value=len(keys),
             unit="count",
-            lineage=lineage,
             notes=f"Unmapped keys: {', '.join(keys) if keys else 'none'}",
             **common,
         ),
-        Evidence(
-            evidence_id=_eid("keys", "quarantined_revenue"),
+        factory.emit(
+            _key("keys", "quarantined_revenue"),
+            kind=QUERY_KIND,
             label="Revenue held in quarantine, unresolvable to an operations key",
             value=quarantined,
             unit="INR_CR",
-            lineage=lineage,
             **common,
         ),
-        Evidence(
-            evidence_id=_eid("keys", "quarantined_share"),
+        factory.emit(
+            _key("keys", "quarantined_share"),
+            kind=QUERY_KIND,
             label="Quarantined revenue as a share of all revenue",
             value=_pct(share, units),
             unit="pct",
-            lineage=lineage,
             **common,
         ),
     )
@@ -568,17 +544,14 @@ def check_grain_allocation(
         connection,
         f'SELECT COUNT(*) AS weeks, SUM(spend_inr) AS total FROM "{spec.source_table}"',
     )
-    allocated = _one(
-        connection,
-        """
+    allocated_sql = """
         SELECT COUNT(*) AS days,
                SUM(allocated_spend_inr) AS total,
                COUNT(DISTINCT CASE WHEN days_in_week <> $nominal
                                    THEN (region, campaign, iso_year, iso_week) END) AS short
         FROM v_marketing_spend_daily
-        """,
-        {"nominal": spec.days_per_week},
-    )
+    """
+    allocated = _one(connection, allocated_sql, {"nominal": spec.days_per_week})
 
     weeks = int(weekly["weeks"])
     weekly_total = _crore(float(weekly["total"]), units)
@@ -586,64 +559,47 @@ def check_grain_allocation(
     allocated_days = int(allocated["days"])
     short_weeks = int(allocated["short"])
 
+    factory = _factory(layer, as_of)
     evidence = (
-        Evidence(
-            evidence_id=_eid("grain", "allocated_spend"),
+        factory.emit(
+            _key("grain", "allocated_spend"),
             kind=DERIVED_KIND,
-            produced_by="code",
             label=(
                 f"Marketing spend allocated from {spec.source_grain} to "
                 f"{spec.target_grain} grain"
             ),
             value=allocated_total,
             unit="INR_CR",
-            reliability=layer.reliability_weight(DERIVED_KIND),
-            source_ref=f"{SOURCE_REF}::check_grain_allocation",
-            as_of=as_of,
-            freshness_hours=0.0,
-            completeness=1.0,
-            lineage=(
-                LineageStep(
-                    step=0,
-                    operation="allocate",
-                    description=(
-                        f"{spec.method}: each week's spend divided evenly across the days "
-                        "of that ISO week present in dim_calendar"
-                    ),
-                    inputs=(spec.source_table, "dim_calendar"),
-                    ref="engine/warehouse/views.sql::v_marketing_spend_daily",
-                ),
+            source_system=DERIVED,
+            method="allocate",
+            description=(
+                f"{spec.method}: each week's spend divided evenly across the days "
+                "of that ISO week present in dim_calendar"
             ),
+            ref="engine/warehouse/views.sql::v_marketing_spend_daily",
+            inputs=(spec.source_table, "dim_calendar"),
+            statement=allocated_sql,
             assumptions=(spec.assumption_tag,),
             notes=spec.note.strip(),
         ),
-        Evidence(
-            evidence_id=_eid("grain", "short_weeks"),
+        factory.emit(
+            _key("grain", "short_weeks"),
             kind=QUERY_KIND,
-            produced_by="code",
             label=(
                 f"Weeks allocated across fewer than {spec.days_per_week} days "
                 "(series edges)"
             ),
             value=short_weeks,
             unit="count",
-            reliability=layer.reliability_weight(QUERY_KIND),
-            source_ref=f"{SOURCE_REF}::check_grain_allocation",
-            as_of=as_of,
-            freshness_hours=0.0,
-            completeness=1.0,
-            lineage=(
-                LineageStep(
-                    step=0,
-                    operation="sql",
-                    description=(
-                        "count of region/campaign/ISO-week groups whose day count differs "
-                        f"from the nominal {spec.days_per_week}"
-                    ),
-                    inputs=("v_marketing_spend_daily",),
-                    ref="engine/warehouse/views.sql::v_marketing_spend_daily",
-                ),
+            source_system=DERIVED,
+            method="count",
+            description=(
+                "count of region/campaign/ISO-week groups whose day count differs "
+                f"from the nominal {spec.days_per_week}"
             ),
+            ref="engine/warehouse/views.sql::v_marketing_spend_daily",
+            inputs=("v_marketing_spend_daily",),
+            statement=allocated_sql,
             assumptions=(spec.assumption_tag,),
         ),
     )
@@ -702,13 +658,11 @@ def check_calendar_alignment(
     units = layer.warehouse.units
     left, right = spec.compare
 
-    aligned = _one(
-        connection,
-        """
+    aligned_sql = """
         SELECT AVG(CASE WHEN same_week_start THEN 1.0 ELSE 0.0 END) AS aligned
         FROM v_calendar_alignment
-        """,
-    )
+    """
+    aligned = _one(connection, aligned_sql)
     aligned_share = float(aligned["aligned"])
 
     overlaps: list[FestivalOverlap] = []
@@ -768,32 +722,23 @@ def check_calendar_alignment(
         )
     )
 
-    reliability = layer.reliability_weight(QUERY_KIND)
+    factory = _factory(layer, as_of)
     common = dict(
-        kind=QUERY_KIND,
-        produced_by="code",
-        reliability=reliability,
-        source_ref=f"{SOURCE_REF}::check_calendar_alignment",
-        as_of=as_of,
-        freshness_hours=0.0,
-        completeness=1.0,
-        lineage=(
-            LineageStep(
-                step=0,
-                operation="sql",
-                description=(
-                    f"festival window days per period, for {sorted(spec.periods)}, "
-                    f"over {spec.calendar_table}"
-                ),
-                inputs=(spec.calendar_table,),
-                ref="engine/warehouse/views.sql::v_calendar_alignment",
-            ),
+        source_system=WAREHOUSE,
+        method="sql",
+        description=(
+            f"festival window days per period, for {sorted(spec.periods)}, "
+            f"over {spec.calendar_table}"
         ),
+        ref="engine/warehouse/views.sql::v_calendar_alignment",
+        inputs=(spec.calendar_table,),
+        statement=aligned_sql,
     )
 
     evidence = (
-        Evidence(
-            evidence_id=_eid("calendar", "aligned_days"),
+        factory.emit(
+            _key("calendar", "aligned_days"),
+            kind=QUERY_KIND,
             label=(
                 f"Days on which the {spec.periods[left].label} and the "
                 f"{spec.periods[right].label} begin together"
@@ -806,8 +751,9 @@ def check_calendar_alignment(
             ),
             **common,
         ),
-        Evidence(
-            evidence_id=_eid("calendar", "divergent_festivals"),
+        factory.emit(
+            _key("calendar", "divergent_festivals"),
+            kind=QUERY_KIND,
             label=(
                 f"Festivals spanning a different number of {spec.periods[left].label}s "
                 f"than {spec.periods[right].label}s"
@@ -862,6 +808,15 @@ GAP_INSERT = (
 )
 
 
+def _factory(layer: SemanticLayer, as_of: datetime) -> EvidenceFactory:
+    """The evidence engine, bound to this reconciliation run.
+
+    `as_of` is the warehouse clock — the DATA timestamp — not the moment
+    the check ran. The factory records that separately.
+    """
+    return EvidenceFactory.for_stage(EVIDENCE_PREFIX, as_of, layer)
+
+
 def _crore(value: float, units: Units) -> float:
     """Quote a rupee figure in crore, at the semantic layer's precision."""
     return round(value / units.inr_per_crore, units.crore_places)
@@ -893,8 +848,14 @@ def _scope_filter(scope: str | None) -> tuple[str, dict[str, Any]]:
     return " WHERE region = $scope", {"scope": scope}
 
 
+def _key(*parts: str | None) -> str:
+    """The stage-local part of an evidence id. The factory adds the prefix."""
+    return ".".join([part for part in parts if part])
+
+
 def _eid(*parts: str | None) -> str:
-    return ".".join([EVIDENCE_PREFIX, *[part for part in parts if part]])
+    """The full evidence id, for referring to one from another's lineage."""
+    return ".".join([EVIDENCE_PREFIX, _key(*parts)])
 
 
 def _gid(*parts: str | None) -> str:

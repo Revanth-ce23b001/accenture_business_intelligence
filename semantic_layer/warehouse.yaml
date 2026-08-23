@@ -31,6 +31,12 @@ units:
   crore_places: 4
   pct_places: 4
 
+  # Calendar arithmetic. Not policy, but rule 2 admits no numbers in
+  # engine/ at all, and a year that is 365.25 days long in one module and
+  # 365 in another is a real class of bug.
+  days_per_week: 7
+  days_per_year: 365.25
+
 # ---------------------------------------------------------------------------
 # Governance. `engine/db.py::execute_governed` is the only path to the
 # warehouse (CLAUDE.md rule 5). It resolves the caller's persona against the
@@ -67,6 +73,8 @@ governance:
   # ever added to it.
   metadata_tables:
     - dim_calendar
+    - dim_festival_window
+    - case_registry
     - kpi_definition_log
     - restatement_register
 
@@ -105,11 +113,13 @@ sources:
   pos:
     table: fact_sales_daily
     date_column: txn_date
+    grain: daily
     scope_join: region
     description: Point-of-sale daily net revenue, the authoritative fact.
   returns:
     table: fact_bill_lines
     date_column: posted_date
+    grain: daily
     scope_join: store_id
     description: >
       Returns credit against the bill's posting date, which is up to three
@@ -118,33 +128,81 @@ sources:
   erp:
     table: dim_store
     date_column: null
+    grain: static
     scope_join: region
     description: Store and organisation master. Static.
   pricing:
     table: dim_sku
     date_column: null
+    grain: static
     scope_join: none
     description: Product and list-price master. Static.
   footfall:
     table: fact_footfall_daily
     date_column: footfall_date
+    grain: daily
     scope_join: store_id
     description: Door-sensor counts. Partial estate coverage.
   wms:
     table: fact_inventory_snapshot
     date_column: snapshot_date
+    grain: daily
     scope_join: store_id
     description: Warehouse and store stock snapshots, four a day.
   qcomm_oms:
     table: fact_qcomm_weekly
     date_column: week_start
+    grain: weekly
     scope_join: none
+    # The table names its own scope rather than carrying a region.
+    scope_column: scope
     description: Quick-commerce order management, weekly. National, no store key.
   store_notes:
     table: doc_store_notes
     date_column: note_date
+    grain: daily
     scope_join: store_id
     description: Free-text shift notes.
+
+# ---------------------------------------------------------------------------
+# EVIDENCE.
+#
+# Every number the engine emits is an `Evidence` record, and every record
+# names WHERE it came from and HOW it was made. Both vocabularies live here
+# so that a typo is a load-time failure rather than an unqueryable string in
+# a table, and so the UI can map either one to an icon without guessing.
+# ---------------------------------------------------------------------------
+evidence:
+
+  # `source_system` is normally a key in `sources` above. These are the
+  # origins that are not source systems but are still an honest answer to
+  # "where did this come from".
+  non_source_origins:
+    derived: >
+      Computed from other evidence rather than read from anywhere. Its
+      lineage names the evidence it was computed from.
+    semantic_layer: >
+      A contract, threshold, definition or weight, read from YAML. The
+      business wrote it down; the engine did not compute it.
+    warehouse: >
+      The warehouse's own metadata — the calendar, the case registry, the
+      definition log. Describes the pipeline, not the business.
+
+  # `method` — how the value was produced. The headline method for the
+  # record; the lineage carries the individual steps.
+  methods:
+    sql: Read from the warehouse by a statement, retained verbatim.
+    ols: Ordinary least squares.
+    stl: Seasonal-trend decomposition.
+    quantile: An empirical quantile of an observed distribution.
+    ratio: One quantity divided by another.
+    difference: One quantity subtracted from another.
+    scale: A unit conversion or rescaling.
+    count: A count of rows or of things.
+    allocate: A quantity spread across a finer grain under an assumption.
+    compare: A comparison against a threshold, a band or a peer.
+    hash: A content fingerprint.
+    lookup: Read straight off a contract or a register.
 
 # ---------------------------------------------------------------------------
 # RECONCILIATION.

@@ -41,6 +41,8 @@ MOCK_LLM=true make demo
 
 ## Status
 
-P5 complete — typed contracts, semantic layer, synthetic data generator, the
-DuckDB warehouse with its governed query path and reconciliation report, and
-VALIDATE (Gate 1). `tests/test_number_registry.py` is green.
+P7 complete — typed contracts, semantic layer, synthetic data generator, the
+DuckDB warehouse with its governed query path and reconciliation report,
+VALIDATE (Gate 1), QUALIFY (Gates 2–5, plus the restraint mechanics), and the
+evidence engine every stage now mints through.
+`tests/test_number_registry.py` is green.

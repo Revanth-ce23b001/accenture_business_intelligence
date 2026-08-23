@@ -37,6 +37,7 @@ REQUIRED_TABLES = {
     "dim_calendar",
     "dim_store_xref",
     "dim_user",
+    "dim_festival_window",
     # facts
     "fact_sales_daily",
     "fact_inventory_snapshot",
@@ -162,6 +163,7 @@ RAW_TO_TABLE = [
     ("dim/dim_store_xref.csv", "dim_store_xref"),
     ("dim/dim_user.csv", "dim_user"),
     ("context/calendar.csv", "dim_calendar"),
+    ("context/festival_windows.csv", "dim_festival_window"),
     ("pos_erp/sales_daily.csv", "fact_sales_daily"),
     ("pos_erp/feed_status.csv", "fact_feed_status"),
     ("store_ops/footfall_daily.csv", "fact_footfall_daily"),

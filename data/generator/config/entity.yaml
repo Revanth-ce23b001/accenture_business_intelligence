@@ -182,6 +182,27 @@ reconciliation:
     fiscal_year_start_day: 1
 
 # --------------------------------------------------------------------------
+# Meridian's own promotional calendar. SCHEDULED windows, published months
+# ahead — not a spend level.
+#
+# The distinction decides case #2451. Gate 2's baseline may contain a promo
+# regressor because a scheduled sale is a calendar event; it must NEVER
+# contain marketing SPEND, because then a spend cut would be absorbed into
+# "calendar-expected" and H4 could never be eliminated on precedence. The
+# windows below are deliberately in January and July, so they are away from
+# every scenario period and can only be fitted, never confounded with one.
+# --------------------------------------------------------------------------
+promotions:
+  uplift: 0.08
+  windows:
+    - name: End of Season Sale
+      start: [1, 10]     # month, day — recurs every year
+      end: [2, 5]
+    - name: Monsoon Clearance
+      start: [7, 1]
+      end: [7, 14]
+
+# --------------------------------------------------------------------------
 # Restatement register. A restatement is DECLARED by finance, not inferred
 # from late-arriving data — which is why Gate 1's fifth check reads this
 # table rather than looking at how young the period is.

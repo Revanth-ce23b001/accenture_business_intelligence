@@ -115,6 +115,16 @@ class LineageStep(_Contract):
         default=None,
         description="Pointer to the producing artefact: query name, module:function, or YAML key",
     )
+    statement: str | None = Field(
+        default=None,
+        description=(
+            "The statement VERBATIM, when this step ran one. Not a hash and not a "
+            "paraphrase: 'clickable to its evidence' means the reader can see the query "
+            "that produced the number and run it themselves. `audit_log` stores a hash "
+            "instead because it is a different table with different access rules; this "
+            "travels with the number it explains."
+        ),
+    )
 
 
 class Evidence(_Contract):
@@ -147,8 +157,41 @@ class Evidence(_Contract):
         ),
     )
 
+    source_system: str = Field(
+        min_length=1,
+        description=(
+            "WHERE the value came from: a key in warehouse.yaml -> sources ('pos', "
+            "'footfall'), or one of its declared non-source origins ('derived' for a value "
+            "computed from other evidence, 'semantic_layer' for a contract or threshold). "
+            "Never null: a number whose system is unknown cannot be chased when it is "
+            "wrong."
+        ),
+    )
+    method: str = Field(
+        min_length=1,
+        description=(
+            "HOW it was produced: 'sql', 'ols', 'stl', 'ratio', 'did'. The headline method "
+            "for the record; the lineage carries the steps. Never null."
+        ),
+    )
     source_ref: str = Field(description="Query name, document id, ticket filter, or URL")
-    as_of: datetime = Field(description="Timestamp the underlying source was current as of")
+
+    source_as_of: datetime = Field(
+        description=(
+            "The DATA timestamp: how current the underlying data is, NOT when it was "
+            "read. A figure computed today from a feed that stopped on Tuesday is as of "
+            "Tuesday, and printing today's date beside it would be a lie about how much "
+            "the reader knows. `retrieved_at` is the other one."
+        )
+    )
+    retrieved_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Wall-clock time the value was computed. Carried so it can never be confused "
+            "with `source_as_of` — a system that has only one timestamp always ends up "
+            "showing the wrong one."
+        ),
+    )
     freshness_hours: float = Field(
         ge=0.0, description="Age at retrieval; feeds s4 data quality and trigger T8"
     )
@@ -156,7 +199,14 @@ class Evidence(_Contract):
         ge=0.0, le=1.0, description="Share of expected records present; feeds s4 with freshness"
     )
 
-    lineage: tuple[LineageStep, ...] = Field(default=())
+    lineage: tuple[LineageStep, ...] = Field(
+        min_length=1,
+        description=(
+            "How the value was derived, in order. At least one step, always: rule 3 says "
+            "every number is clickable to its evidence, and a record with no lineage is a "
+            "number with nothing behind it."
+        ),
+    )
 
     assumptions: tuple[str, ...] = Field(
         default=(),
@@ -168,6 +218,22 @@ class Evidence(_Contract):
         ),
     )
     notes: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _timestamps_are_distinguishable(self) -> Evidence:
+        """`source_as_of` must not silently become the retrieval time.
+
+        The failure this prevents is quiet and expensive: a stale feed
+        displayed with today's date beside it reads as fresh, and nobody
+        looks again.
+        """
+        if self.retrieved_at is not None and self.retrieved_at < self.source_as_of:
+            raise ValueError(
+                f"Evidence {self.evidence_id!r}: retrieved_at {self.retrieved_at} is "
+                f"before source_as_of {self.source_as_of}. Data cannot be newer than the "
+                "moment it was read."
+            )
+        return self
 
     @model_validator(mode="after")
     def _model_output_carries_no_number(self) -> Evidence:
@@ -191,22 +257,39 @@ class Evidence(_Contract):
 # ---------------------------------------------------------------------------
 
 
-#: What one Gate 1 check returned. A NAMED EXIT, never a boolean:
+#: What one gate check returned. A NAMED EXIT, never a boolean:
 #: "validation failed" tells an analyst nothing, and "25 store feeds did
 #: not load, so the -18% is an artefact" tells them everything. `CLEAN` is
 #: the pass, and it is named too so that a result is always readable
 #: without knowing which way round the boolean went.
 #:
-#: The failure codes must match `ExitCode` in semantic_layer/schema.py,
-#: which is where the checks that produce them are configured.
-ValidationOutcome = Literal[
+#: The codes must match those configured in `semantic_layer/validate.yaml`
+#: (gate 1) and `semantic_layer/qualify.yaml` (gates 2-5).
+StageOutcome = Literal[
     "CLEAN",
+    # VALIDATE — gate 1
     "DATA_INCIDENT",
     "DEFINITION_CHANGE",
     "ONE_OFF",
     "PENDING_RESTATEMENT",
     "INSUFFICIENT_BASELINE",
+    # QUALIFY — gates 2 to 5
+    "CALENDAR_MODEL_UNFIT",
+    "INSUFFICIENT_HISTORY",
+    "WITHIN_BAND",
+    "MARKET_CASE",
+    "PEERS_NOT_VISIBLE",
+    "IMMATERIAL",
+    # QUALIFY — restraint
+    "DUPLICATE_OF_OPEN_CASE",
+    "SUPPRESSED_BY_OPEN_CASE",
+    "OWNER_WEEKLY_CAP",
 ]
+
+#: The name P5 gave the same vocabulary, kept so its imports still read
+#: naturally. QUALIFY added to the set rather than starting a second one:
+#: two closed vocabularies for the same field is how they drift apart.
+ValidationOutcome = StageOutcome
 
 
 class CheckResult(_Contract):
@@ -215,7 +298,7 @@ class CheckResult(_Contract):
     check_id: str = Field(description="Key in semantic_layer/validate.yaml -> checks")
     name: str
     order: int = Field(ge=1, description="Evaluation and reporting priority; 1 is first")
-    outcome: ValidationOutcome
+    outcome: StageOutcome
     detail: str = Field(description="One line, naming what was found. Rendered on the chip.")
     subjects: tuple[str, ...] = Field(
         default=(),
@@ -550,6 +633,7 @@ __all__ = [
     "TelemetryEvent",
     "TestResult",
     "TestType",
+    "StageOutcome",
     "TriggerId",
     "ValidationOutcome",
     "Verdict",

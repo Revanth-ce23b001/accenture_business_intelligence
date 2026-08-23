@@ -34,7 +34,7 @@ from typing import Any, Callable, Mapping
 
 import duckdb
 
-from engine.contracts import CheckResult, Evidence, Grain, LineageStep
+from engine.contracts import CheckResult, Evidence, Grain
 from engine.db import (
     GovernanceError,
     as_stored_timestamp,
@@ -42,6 +42,7 @@ from engine.db import (
     execute_metadata,
     warehouse_clock,
 )
+from engine.evidence import EvidenceFactory
 from security.policy import User
 from semantic_layer.schema import KpiContract, SemanticLayer, get_semantic_layer
 
@@ -52,6 +53,14 @@ SOURCE_REF = "engine/validate/checks.py"
 
 QUERY_KIND = "structured_query"
 DERIVED_KIND = "derived_estimate"
+
+#: `Evidence.source_system` values this stage uses. Declared in
+#: semantic_layer/warehouse.yaml; named here so a typo is an ImportError.
+POS_SOURCE = "pos"
+RETURNS_SOURCE = "returns"
+SEMANTIC_LAYER = "semantic_layer"
+WAREHOUSE = "warehouse"
+DERIVED = "derived"
 
 #: Seconds in an hour, without writing 3600 (CLAUDE.md rule 2 admits no
 #: numbers in engine/, and this is arithmetic rather than policy).
@@ -159,6 +168,7 @@ class ValidationContext:
     period: Window
     baseline: Window
     comparison: Window | None
+    factory: EvidenceFactory
 
     @property
     def kpi(self) -> KpiContract:
@@ -229,15 +239,20 @@ def build_context(
         if request.comparison_period
         else None
     )
+    resolved_clock = clock or warehouse_clock(connection, layer)
     return ValidationContext(
         connection=connection,
         user=user,
         request=request,
         layer=layer,
-        clock=clock or warehouse_clock(connection, layer),
+        clock=resolved_clock,
         period=period,
         baseline=baseline_window(period, lookback),
         comparison=comparison,
+        # The stage's data timestamp is the warehouse clock, fixed once for
+        # the whole run so every figure agrees about how current the data
+        # was. It is NOT `now()`, which the factory records separately.
+        factory=EvidenceFactory.for_stage(EVIDENCE_PREFIX, resolved_clock, layer),
     )
 
 
@@ -254,37 +269,38 @@ def _evidence(
     label: str,
     value: float | int | str | None,
     unit: str,
+    source_system: str,
     kind: str = QUERY_KIND,
     operation: str = "sql",
     description: str,
     inputs: tuple[str, ...] = (),
     ref: str,
+    statement: str | None = None,
     completeness: float = 1.0,
     freshness_hours: float = 0.0,
     notes: str | None = None,
     assumptions: tuple[str, ...] = (),
 ) -> Evidence:
-    return Evidence(
-        evidence_id=f"{EVIDENCE_PREFIX}.{check_id}.{name}",
+    """Mint one record through the evidence engine.
+
+    Nothing here chooses a reliability weight, an id prefix or a
+    timestamp — `engine/evidence.py` does, and it refuses anything it
+    cannot make chaseable.
+    """
+    return ctx.factory.emit(
+        f"{check_id}.{name}",
         kind=kind,
-        produced_by="code",
         label=label,
         value=value,
         unit=unit,
-        reliability=ctx.layer.reliability_weight(kind),
-        source_ref=f"{SOURCE_REF}::check_{check_id}",
-        as_of=ctx.clock,
+        source_system=source_system,
+        method=operation,
+        description=description,
+        ref=ref,
+        inputs=inputs,
+        statement=statement,
         freshness_hours=freshness_hours,
         completeness=completeness,
-        lineage=(
-            LineageStep(
-                step=0,
-                operation=operation,
-                description=description,
-                inputs=inputs,
-                ref=ref,
-            ),
-        ),
         assumptions=assumptions,
         notes=notes,
     )
@@ -359,7 +375,7 @@ def check_source_freshness(ctx: ValidationContext) -> tuple[CheckResult, tuple[E
             static.append(name)
             continue
 
-        last_loaded = _source_last_loaded(ctx, name, location)
+        last_loaded, statement = _source_last_loaded(ctx, name, location)
         if last_loaded is None:
             unverified.append(name)
             continue
@@ -379,12 +395,14 @@ def check_source_freshness(ctx: ValidationContext) -> tuple[CheckResult, tuple[E
                 label=f"{name} feed staleness against a {sla_hours:g}h SLA",
                 value=round(hours, ctx.layer.warehouse.units.pct_places),
                 unit="hours",
+                source_system=name,
                 description=(
                     f"MAX({location.date_column}) over {location.table}, against the "
                     "warehouse clock"
                 ),
                 inputs=(location.table,),
                 ref=f"semantic_layer/warehouse.yaml::sources.{name}",
+                statement=statement,
                 freshness_hours=hours,
                 notes=location.description.strip(),
             )
@@ -424,8 +442,15 @@ def check_source_freshness(ctx: ValidationContext) -> tuple[CheckResult, tuple[E
     )
 
 
-def _source_last_loaded(ctx: ValidationContext, name: str, location) -> datetime | None:
-    """Newest row in a source, or None when this persona cannot read it."""
+def _source_last_loaded(
+    ctx: ValidationContext, name: str, location
+) -> tuple[datetime | None, str | None]:
+    """Newest row in a source, and the statement that found it.
+
+    The statement comes back so it can be kept VERBATIM on the evidence:
+    a reader who doubts a staleness figure should be able to run the query
+    that produced it, not a description of it.
+    """
     if location.scope_join == "region":
         sql = (
             f'SELECT region, store_id, MAX("{location.date_column}") AS last_loaded '
@@ -445,15 +470,15 @@ def _source_last_loaded(ctx: ValidationContext, name: str, location) -> datetime
     try:
         rows = ctx.governed(sql, purpose=f"validate.source_freshness.{name}")
     except GovernanceError:
-        return None
+        return None, sql
 
     values = [row["last_loaded"] for row in rows if row.get("last_loaded") is not None]
     if not values:
-        return None
+        return None, sql
     newest = max(values)
     if isinstance(newest, datetime):
-        return newest.replace(tzinfo=UTC) if newest.tzinfo is None else newest
-    return datetime(newest.year, newest.month, newest.day, tzinfo=UTC)
+        return (newest.replace(tzinfo=UTC) if newest.tzinfo is None else newest), sql
+    return datetime(newest.year, newest.month, newest.day, tzinfo=UTC), sql
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +501,7 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
     spec = ctx.spec.row_count_delta
     units = ctx.layer.warehouse.units
 
-    rows = ctx.governed(
-        f"""
+    statement = f"""
         SELECT
             region,
             store_id,
@@ -494,7 +518,9 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
         FROM "{spec.source_table}"
         WHERE feed_date BETWEEN $b_start AND $p_end{ctx.scope_clause()}
         GROUP BY 1, 2
-        """,
+    """
+    rows = ctx.governed(
+        statement,
         {
             "p_start": ctx.period.start,
             "p_end": ctx.period.end,
@@ -557,6 +583,8 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
             ctx,
             "row_count_delta",
             "stores_checked",
+            source_system=POS_SOURCE,
+            statement=statement,
             label=f"Stores with feed history in {ctx.request.scope}",
             value=store_count,
             unit="count",
@@ -570,6 +598,8 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
             ctx,
             "row_count_delta",
             "stores_short",
+            source_system=POS_SOURCE,
+            statement=statement,
             label=(
                 f"Stores loading more than {spec.max_store_shortfall:.0%} below their "
                 f"own {spec.lookback_weeks}-week median"
@@ -588,6 +618,7 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
             ctx,
             "row_count_delta",
             "store_share",
+            source_system=DERIVED,
             label="Share of the scope's stores whose feed fell short",
             value=round(share * units.percent_scale, units.pct_places),
             unit="pct",
@@ -604,6 +635,7 @@ def check_row_count_delta(ctx: ValidationContext) -> tuple[CheckResult, tuple[Ev
             ctx,
             "row_count_delta",
             "revenue_share",
+            source_system=DERIVED,
             label="Share of the scope's revenue sitting behind those feeds",
             value=round(revenue_share * units.percent_scale, units.pct_places),
             unit="pct",
@@ -666,7 +698,7 @@ def _affected_revenue_share(ctx: ValidationContext, store_ids: list[str]) -> flo
         FROM fact_sales_daily
         WHERE txn_date BETWEEN $p_start AND $p_end{ctx.scope_clause()}
         GROUP BY 1, 2
-        """,
+    """,
         {"p_start": ctx.period.start, "p_end": ctx.period.end, **ctx.scope_params()},
         purpose="validate.row_count_delta.revenue_share",
     )
@@ -726,6 +758,7 @@ def check_definition_drift(ctx: ValidationContext) -> tuple[CheckResult, tuple[E
             ctx,
             "definition_drift",
             "current_hash",
+            source_system=SEMANTIC_LAYER,
             label=f"{kpi.kpi} definition fingerprint",
             value=current,
             unit="sha256",
@@ -839,7 +872,7 @@ def check_single_transaction_dominance(
     spec = ctx.spec.single_transaction_dominance
     units = ctx.layer.warehouse.units
 
-    movement, basis = _movement_inr(ctx)
+    movement, basis, movement_sql = _movement_inr(ctx)
     if abs(movement) < spec.min_movement_inr:
         return _result(
             "single_transaction_dominance",
@@ -854,8 +887,7 @@ def check_single_transaction_dominance(
             ),
         )
 
-    rows = ctx.governed(
-        f"""
+    statement = f"""
         SELECT
             region,
             store_id,
@@ -874,7 +906,9 @@ def check_single_transaction_dominance(
             GROUP BY 1, 2, 3
         )
         GROUP BY 1, 2
-        """,
+    """
+    rows = ctx.governed(
+        statement,
         {
             "p_start": datetime.combine(ctx.period.start, datetime.min.time()),
             "p_next": datetime.combine(
@@ -908,6 +942,8 @@ def check_single_transaction_dominance(
             ctx,
             "single_transaction_dominance",
             "movement",
+            source_system=POS_SOURCE,
+            statement=movement_sql,
             label=f"Movement being validated ({basis})",
             value=round(movement / units.inr_per_crore, units.crore_places),
             unit="INR_CR",
@@ -919,6 +955,8 @@ def check_single_transaction_dominance(
             ctx,
             "single_transaction_dominance",
             "top_transaction",
+            source_system=RETURNS_SOURCE,
+            statement=statement,
             label=f"Largest single bill in {ctx.request.scope} over the period",
             value=round(top_inr / units.inr_per_lakh, units.crore_places),
             unit="INR_L",
@@ -939,6 +977,7 @@ def check_single_transaction_dominance(
             ctx,
             "single_transaction_dominance",
             "share_of_movement",
+            source_system=DERIVED,
             label="Largest bill as a share of the movement",
             value=round(share * units.percent_scale, units.pct_places),
             unit="pct",
@@ -984,7 +1023,7 @@ def check_single_transaction_dominance(
     )
 
 
-def _movement_inr(ctx: ValidationContext) -> tuple[float, str]:
+def _movement_inr(ctx: ValidationContext) -> tuple[float, str, str]:
     """The movement in rupees, and one line saying what it was measured against.
 
     With a comparison period, it is period-over-period. Without one, it is
@@ -996,8 +1035,7 @@ def _movement_inr(ctx: ValidationContext) -> tuple[float, str]:
     lo = min(ctx.period.start, comparison.start) if comparison else ctx.period.start
     hi = max(ctx.period.end, comparison.end) if comparison else ctx.period.end
 
-    rows = ctx.governed(
-        f"""
+    statement = f"""
         SELECT
             region,
             store_id,
@@ -1010,7 +1048,9 @@ def _movement_inr(ctx: ValidationContext) -> tuple[float, str]:
         FROM fact_sales_daily
         WHERE txn_date BETWEEN $lo AND $hi{ctx.scope_clause()}
         GROUP BY 1, 2
-        """,
+    """
+    rows = ctx.governed(
+        statement,
         {
             "p_start": ctx.period.start,
             "p_end": ctx.period.end,
@@ -1030,7 +1070,7 @@ def _movement_inr(ctx: ValidationContext) -> tuple[float, str]:
     else:
         against = sum(float(row["expected_inr"] or 0.0) for row in rows)
         basis = f"{ctx.request.period} against its calendar expectation"
-    return period_total - against, basis
+    return period_total - against, basis, statement
 
 
 # ---------------------------------------------------------------------------
@@ -1053,9 +1093,7 @@ def check_restatement_pending(
     kpi = ctx.kpi
     window_days = kpi.refresh.restatement_window_days
 
-    rows = ctx.metadata(
-        spec.register_table,
-        f"""
+    statement = f"""
         SELECT restatement_id, scope, period, flagged_at, status, reason
         FROM "{spec.register_table}"
         WHERE kpi = $kpi
@@ -1063,7 +1101,10 @@ def check_restatement_pending(
           AND status = $open
           AND scope IN ($scope, $wildcard)
         ORDER BY flagged_at
-        """,
+    """
+    rows = ctx.metadata(
+        spec.register_table,
+        statement,
         {
             "kpi": kpi.kpi,
             "period": ctx.request.period,
@@ -1079,6 +1120,8 @@ def check_restatement_pending(
             ctx,
             "restatement_pending",
             "open_flags",
+            source_system=WAREHOUSE,
+            statement=statement,
             label=f"Open restatement flags covering {ctx.request.scope} {ctx.request.period}",
             value=len(rows),
             unit="count",

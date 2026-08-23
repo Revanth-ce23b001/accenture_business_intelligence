@@ -12,6 +12,7 @@ Both are deliberate: they are what the extraction lane has to earn.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -309,6 +310,78 @@ def emit_calendar(world, out: Path) -> dict[str, int]:
     frame = world.calendar.copy()
     frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
     return {"context/calendar.csv": write_csv(frame, out / "context" / "calendar.csv")}
+
+
+def emit_festival_windows(world, out: Path) -> dict[str, int]:
+    """One row per (festival occurrence, day). The bridge dim_calendar cannot be.
+
+    `dim_calendar.festival` holds ONE label per day, and festivals overlap:
+    Onam and Ganesh Chaturthi run together in South, Navratri and Durga
+    Puja in East. A single label silently drops the second one, and a
+    calendar model built on it cannot fit either.
+
+    This table carries membership properly, plus the two things a model
+    needs and a flag cannot express:
+
+      day_index / window_days   where in the ramp the day falls. A festival
+                                is not a switch; trade builds through the
+                                window and peaks somewhere inside it.
+      phase                     'window' or 'hangover'. The days after a
+                                festival are suppressed, not normal.
+
+    `occurrence` is the fiscal year the window opens in, so the two Diwalis
+    are two rows and not one smeared average.
+    """
+    from data.generator.model import FESTIVAL_HANGOVER_DAYS, FESTIVALS
+
+    calendar = world.calendar
+    known = set(calendar["date"].dt.date.to_numpy())
+    fiscal = dict(
+        zip(calendar["date"].dt.date, calendar["fiscal_year_label"], strict=True)
+    )
+
+    rows = []
+    for name, windows in sorted(FESTIVALS.items()):
+        for window_start, window_end in windows:
+            span = (window_end - window_start).days + 1
+            occurrence = fiscal.get(window_start, "")
+            for offset in range(span):
+                day = window_start + timedelta(days=offset)
+                if day not in known:
+                    continue
+                rows.append(
+                    {
+                        "date": day.isoformat(),
+                        "festival": name,
+                        "occurrence": occurrence or fiscal.get(day, ""),
+                        "phase": "window",
+                        "day_index": offset,
+                        "phase_days": span,
+                    }
+                )
+            for offset in range(FESTIVAL_HANGOVER_DAYS):
+                day = window_end + timedelta(days=offset + 1)
+                if day not in known:
+                    continue
+                rows.append(
+                    {
+                        "date": day.isoformat(),
+                        "festival": name,
+                        "occurrence": occurrence or fiscal.get(day, ""),
+                        "phase": "hangover",
+                        "day_index": offset,
+                        "phase_days": FESTIVAL_HANGOVER_DAYS,
+                    }
+                )
+
+    frame = pd.DataFrame(rows).sort_values(
+        ["date", "festival", "phase"], kind="stable"
+    ).reset_index(drop=True)
+    return {
+        "context/festival_windows.csv": write_csv(
+            frame, out / "context" / "festival_windows.csv"
+        )
+    }
 
 
 CAMPAIGNS = ["Always On", "Festive Push", "Weekend Offer", "New Range", "Clearance"]

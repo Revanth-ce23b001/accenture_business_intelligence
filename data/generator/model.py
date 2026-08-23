@@ -137,6 +137,12 @@ FESTIVALS = {
     ],
 }
 
+#: Days of suppressed demand after a festival window closes. Shoppers buy
+#: ahead, then pause, and the pause is what makes a post-festival month look
+#: bad without anything being wrong. Named here because `festival_factor`
+#: applies it and `emit_festival_windows` has to describe the same days.
+FESTIVAL_HANGOVER_DAYS = 7
+
 #: Where in its window each festival's trade peaks, as a fraction of the
 #: window. This matters more than it looks: Onam's peak is Thiruvonam, the
 #: LAST day of its window (5 Sep 2025), so Onam trade lands in September.
@@ -167,7 +173,10 @@ FESTIVAL_REGION_INTENSITY = {
 
 
 def build_calendar(
-    start: date, end: date, fiscal_year_start: tuple[int, int] = FISCAL_YEAR_START
+    start: date,
+    end: date,
+    fiscal_year_start: tuple[int, int] = FISCAL_YEAR_START,
+    promotions: list[dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """Gregorian plus fiscal plus festival, one row per day."""
     days = pd.date_range(start, end, freq="D")
@@ -216,6 +225,23 @@ def build_calendar(
             festival_name[mask] = name
     frame["festival"] = festival_name
     frame["is_festival"] = frame["festival"] != ""
+
+    # Meridian's own promotional calendar: scheduled windows, recurring
+    # every year. A promo window is a CALENDAR event, not a spend level —
+    # see the note in entity.yaml.
+    promo_name = np.full(len(frame), "", dtype=object)
+    for window in promotions or []:
+        start_month, start_day = window["start"]
+        end_month, end_day = window["end"]
+        for year in sorted(set(frame["year"])):
+            opens = date(year, start_month, start_day)
+            closes = date(year, end_month, end_day)
+            if closes < opens:  # window rolls over the new year
+                closes = date(year + 1, end_month, end_day)
+            mask = (dates >= opens) & (dates <= closes)
+            promo_name[mask] = window["name"]
+    frame["promo_window"] = promo_name
+    frame["is_promo_window"] = frame["promo_window"] != ""
     return frame
 
 
@@ -245,10 +271,12 @@ def festival_factor(calendar: pd.DataFrame, region: str, amplitude: float) -> np
                     remapped = 0.5 + 0.5 * (position - peak) / (1.0 - peak)
                 shape = np.sin(np.pi * remapped)
                 factor[dates == day] *= 1.0 + amplitude * intensity * shape
-            # Hangover: seven days of suppressed demand after the window.
-            for offset in range(1, 8):
+            # Hangover: suppressed demand after the window closes.
+            for offset in range(1, FESTIVAL_HANGOVER_DAYS + 1):
                 day = window_end + timedelta(days=offset)
-                decay = (8 - offset) / 8.0
+                decay = (FESTIVAL_HANGOVER_DAYS + 1 - offset) / (
+                    FESTIVAL_HANGOVER_DAYS + 1
+                )
                 factor[dates == day] *= 1.0 - 0.34 * amplitude * intensity * decay
     return factor
 
@@ -385,6 +413,15 @@ def build_base_series(
     doy = calendar["date"].dt.dayofyear.to_numpy()
     season = 1.0 + 0.05 * np.sin(2 * np.pi * (doy - 60) / 365.25)
 
+    # Scheduled promotions lift trade while they run. Flat within the
+    # window, because that is what the business plans; whether the uplift
+    # is real is Gate 2's problem, not the generator's.
+    promo = np.where(
+        calendar["is_promo_window"].to_numpy(),
+        1.0 + float(entity["promotions"]["uplift"]),
+        1.0,
+    )
+
     calendar_factor = np.empty((n_stores, n_days))
     region_arr = stores["region"].to_numpy()
     for region in REGIONS:
@@ -399,6 +436,7 @@ def build_base_series(
         * dow_mult[None, :]
         * trend[None, :]
         * season[None, :]
+        * promo[None, :]
         * calendar_factor
         * np.exp(store_noise + daily_noise)
     )

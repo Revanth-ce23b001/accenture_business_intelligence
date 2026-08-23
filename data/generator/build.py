@@ -284,6 +284,7 @@ def build_world() -> World:
             int(fiscal["fiscal_year_start_month"]),
             int(fiscal["fiscal_year_start_day"]),
         ),
+        promotions=entity["promotions"]["windows"],
     )
 
     stores = build_stores(entity, streams)
@@ -661,6 +662,7 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
         sources_ops.emit_reviews,
         sources_ops.emit_footfall,
         sources_ops.emit_calendar,
+        sources_ops.emit_festival_windows,
         sources_ops.emit_marketing_spend,
         sources_ops.emit_competitor_news,
         sources_ops.emit_weather,

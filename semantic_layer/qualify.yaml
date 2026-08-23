@@ -1,0 +1,234 @@
+# QUALIFY — Gates 2 to 5, and the restraint that stops the system shouting.
+#
+# VALIDATE asked whether the movement is real. QUALIFY asks whether it is
+# WORTH EXPLAINING, and that is four separate questions:
+#
+#   Gate 2  calendar      how much of it is the calendar? Decompose, do not
+#                         adjust. The series is never touched.
+#   Gate 3  band          is what is left bigger than this scope's normal
+#                         unexplained variation? And is there enough history
+#                         to have an opinion at all?
+#   Gate 4  specificity   is this scope's problem, or the market's? Three
+#                         regions moving together is one case, not four.
+#   Gate 5  materiality   is it worth the owner's afternoon?
+#
+# Then restraint: a stock-out moves revenue, units, conversion and on-shelf
+# availability, and that is ONE case. An investigator that opens four has
+# not understood the business; an investigator that opens forty a week gets
+# ignored, and an ignored investigator is worth nothing.
+#
+# CLAUDE.md rule 2: every threshold below is read from here by
+# engine/qualify/, which contains no number of its own.
+
+version: 1
+
+# ===========================================================================
+# GATE 2 — Calendar decomposition
+# ===========================================================================
+#
+# An OLS on daily regional revenue, predicting the period under test and
+# the period before it under THEIR OWN calendars. The difference between
+# what the calendar says the two periods should have delivered is the
+# calendar effect; whatever is left is the qualified residual.
+#
+# DECOMPOSE, DO NOT ADJUST. Nothing is subtracted from the series. The
+# gate reports how many points of the movement the calendar accounts for
+# and hands the untouched series on. An adjusted series cannot be audited,
+# and a reader cannot tell an adjustment from a fact.
+calendar:
+  gate_id: 2
+  name: Calendar decomposition
+  outcome_code: CALENDAR_MODEL_UNFIT
+
+  model:
+    estimator: ols
+    # Fitted on log revenue. The generator's world — and retail generally —
+    # is multiplicative: a festival multiplies trade, it does not add to it.
+    # In logs those effects are additive and OLS is the right estimator.
+    target_transform: log
+
+    # CLAUDE.md's brief asks for three years. This dataset holds eighteen
+    # months, so the model uses what exists and says how much that was.
+    requested_history_years: 3
+    min_fit_days: 180
+
+    # The period under test is EXCLUDED from the fit. A baseline fitted
+    # through the anomaly it is meant to measure will always understate it.
+    exclude_period_under_test: true
+
+    regressors:
+      day_of_week: true
+      # Trading days in the period enter by construction: the model is
+      # daily and the period prediction is the sum over the days the period
+      # actually has. November having one fewer day than October IS the
+      # calendar effect on #2451, almost in full.
+      trading_days: by_construction
+      trend: true
+      annual_harmonics: 1
+      pay_cycle: true
+      month_end: true
+      promo_window: true
+
+      # Festival-window overlap. A festival is not a switch: trade ramps
+      # up through the window, peaks, and leaves a hangover of suppressed
+      # demand behind it. Splitting the window in half approximates the
+      # ramp without pretending to know its functional form.
+      #
+      # TWO segments, not four, and that is a bias-variance choice with a
+      # measured consequence. Eighteen months holds two occurrences of most
+      # festivals, so four segments leaves about five days per coefficient
+      # and the model stops generalising: on case #2472 — September against
+      # a Ganesh Chaturthi window that STRADDLES the month boundary, so the
+      # September half is extrapolated from one prior year — four segments
+      # recovers +6.3 pt of the +12 pt expected rise and two recovers
+      # +11.7 pt. Four fits the past better and predicts worse.
+      #
+      # The hangover stays one block for the same reason: splitting it
+      # costs seven parameters and moves nothing measurable.
+      festival_window_segments: 2
+      festival_hangover_days: 7
+      festival_hangover_segments: 1
+
+    # A calendar baseline is not fitted through a month the business
+    # already knows was abnormal. Pass one fits everything; months whose
+    # mean residual exceeds this many standard deviations of the monthly
+    # residual distribution are dropped; pass two refits. Excluded months
+    # are reported, never silently removed.
+    anomaly_exclusion:
+      method: monthly_mean_residual
+      sigma: 3.0
+
+  # The calendar effect is the model's prediction for M measured against
+  # the ACTUAL level of M-1, not against its prediction for M-1. Folding
+  # the model's fit error on a clean month into "calendar" would attribute
+  # to the calendar something the calendar did not do. The prediction for
+  # M-1 is emitted as evidence, so the fit error is visible rather than
+  # absorbed.
+  decomposition:
+    denominator: actual_previous_period
+    emit_previous_period_fit: true
+    # headline = calendar + residual holds by construction, so this is a
+    # floating-point tolerance and not a business one. It exists so the
+    # identity is CHECKED rather than assumed.
+    reconciliation_tolerance_pt: 1.0e-9
+
+# ===========================================================================
+# GATE 3 — Residual band, and whether there is history to have an opinion
+# ===========================================================================
+band:
+  gate_id: 3
+  name: History and residual band
+  history_outcome_code: INSUFFICIENT_HISTORY
+  within_band_outcome_code: WITHIN_BAND
+
+  history:
+    # Counted from the warehouse, not read off the contract: a KPI can
+    # declare seventy-eight weeks of history and hold seven.
+    source: observed_periods
+    # Compared against the KPI contract's baseline.min_history_weeks.
+    min_from: kpi_contract.baseline.min_history_weeks
+
+  # NOT sigma. Business series are heavy-tailed and autocorrelated, so two
+  # standard deviations is not a 95% statement about anything. The band is
+  # the empirical quantile of what this scope's residual actually does.
+  method: stl_residual_empirical_quantile
+  stl:
+    period: 7
+    robust: true
+    # STL runs on the CALENDAR-ADJUSTED series, not on raw revenue. Run on
+    # raw revenue the residual is dominated by festivals — which Gate 2 has
+    # already explained — and the band comes out several times too wide.
+    input: calendar_residual
+  # lookback and quantile come from the KPI contract's
+  # thresholds.band_lookback_weeks and thresholds.band_quantile.
+  min_band_observations: 21
+
+# ===========================================================================
+# GATE 4 — Specificity
+# ===========================================================================
+specificity:
+  gate_id: 4
+  name: Specificity
+  outcome_code: MARKET_CASE
+
+  # Every peer scope is decomposed by the same method, and the peer set is
+  # the KPI's own `region` dimension.
+  peer_dimension: region
+  min_peers_breaching: 3
+  same_direction_required: true
+  # A market case is escalated, not delegated: it is nobody's region and
+  # everybody's problem.
+  escalate_to_role: cco
+  # When the caller's row policy hides the peers, the gate cannot rule and
+  # says so rather than concluding the movement is specific.
+  unknown_outcome_code: PEERS_NOT_VISIBLE
+
+# ===========================================================================
+# GATE 5 — Materiality
+# ===========================================================================
+materiality:
+  gate_id: 5
+  name: Materiality
+  outcome_code: IMMATERIAL
+  # The limit is the KPI contract's own, in the contract's own unit: rupees
+  # for a value KPI, points for a rate. Its OWNER set it; this file does not
+  # get to second-guess them.
+  threshold_from: kpi_contract.thresholds.materiality
+  # Below the limit the movement still gets reported — in the weekly
+  # digest. Sub-threshold is not "ignore", it is "not a case".
+  sub_threshold_route: weekly_digest
+
+# ===========================================================================
+# RESTRAINT
+# ===========================================================================
+#
+# The three mechanics that stop a working investigator becoming an
+# unreadable one.
+restraint:
+
+  # 1. One cause, one case.
+  #
+  # A stock-out moves net revenue, transactions, conversion rate and
+  # on-shelf availability. Those are four KPIs and one event. The case is
+  # opened on the first KPI to qualify; the rest are linked to it.
+  #
+  # The correlation is not inferred from the data — it is declared in the
+  # KPI contracts, as `drivers` and `related_kpis`, which is where the
+  # business already wrote it down.
+  deduplication:
+    enabled: true
+    link_via: [drivers, related_kpis]
+    require_same_scope: true
+    require_same_period: true
+    outcome_code: DUPLICATE_OF_OPEN_CASE
+    # The case that survives is the one on the KPI whose movement is
+    # largest relative to its own materiality limit — the one the business
+    # would care about most, not the one that happened to run first.
+    keep: largest_relative_to_materiality
+
+  # 2. Do not re-open what is already open.
+  #
+  # While a case is open on a scope and KPI, later periods are suppressed:
+  # the investigation covers them, and a second case would split the
+  # evidence in half.
+  suppression:
+    enabled: true
+    window_days: 28
+    outcome_code: SUPPRESSED_BY_OPEN_CASE
+    # A movement that is materially WORSE than the open case's is not
+    # suppressed — it is an escalation, and it reopens.
+    escalation_multiple: 2.0
+
+  # 3. Three cases a week, per owner.
+  #
+  # CLAUDE.md gives no derivation for three, and there is not one to give:
+  # it is a statement about how many investigations a human being can hold
+  # at once. Above the cap, qualifying movements are deferred to the
+  # digest and reported as deferred, never dropped.
+  owner_load:
+    enabled: true
+    max_open_cases_per_owner_per_week: 3
+    owner_from: kpi_contract.owner_role
+    window: iso_week
+    outcome_code: OWNER_WEEKLY_CAP
+    over_cap_route: weekly_digest

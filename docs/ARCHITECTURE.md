@@ -43,8 +43,15 @@ restated, just located.
 | What each team means by "revenue", and which definition arbitrates | `semantic_layer/warehouse.yaml` |
 | Row predicates and masked columns, per persona, per KPI | `semantic_layer/kpis/*.yaml` → `access_policy` |
 | The single door to the warehouse | `engine/db.py::execute_governed` |
+| The single way to publish a number | `engine/evidence.py::EvidenceFactory` |
+| What an evidence record may say about where it came from and how it was made | `semantic_layer/warehouse.yaml` → `evidence` |
+| The floor rule, and what it blocks | `engine/evidence.py::can_promote_to_explained` |
 | The narrow companion for pipeline metadata, and its allow-list | `engine/db.py::execute_metadata`, `semantic_layer/warehouse.yaml` → `governance.metadata_tables` |
 | Gate 1's five checks and every threshold they use | `semantic_layer/validate.yaml` |
+| Gates 2–5, and the restraint that limits how many cases open | `semantic_layer/qualify.yaml` |
+| Which gate number belongs to which stage | `semantic_layer/adjudication.yaml` → `gates` |
+| Festival membership per day, with overlaps intact | table `dim_festival_window` |
+| Meridian's own scheduled promo windows | `dim_calendar.promo_window` |
 | Where each KPI source system lands in the warehouse | `semantic_layer/warehouse.yaml` → `sources` |
 | Which definition a KPI was computed under, run by run | table `kpi_definition_log` |
 | Periods finance has reopened | table `restatement_register` |
