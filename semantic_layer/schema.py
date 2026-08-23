@@ -402,6 +402,19 @@ class ConfidenceComponentSpec(_Node):
     penalise_when: str | None = None
     reference_weeks: int | None = Field(default=None, gt=0)
     regime_change_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: s1 — the logistic's zero and unit, in standard errors.
+    midpoint_t: float | None = Field(default=None, ge=0.0)
+    scale_t: float | None = Field(default=None, gt=0.0)
+    pretest_failure_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: s2 — whether a test that could not run counts against the score.
+    not_testable_counts: bool | None = None
+    #: s3 — which agreement statistic, and whether it floors at zero.
+    statistic: str | None = None
+    floor_at_zero: bool | None = None
+    #: s4 — the multiple of the SLA at which freshness scores zero.
+    zero_at_sla_multiple: float | None = Field(default=None, gt=1.0)
+    #: s5 — which sources the depth is measured over.
+    scope: str | None = None
 
 
 class CapSpec(_Node):
@@ -416,6 +429,30 @@ class CalibrationSpec(_Node):
     publication_floor: float = Field(ge=0.0, le=1.0)
     max_expected_calibration_error: float = Field(ge=0.0, le=1.0)
     min_cases_for_band: int = Field(ge=1)
+    min_cases_for_fit: int = Field(ge=1)
+    band_edges: list[float] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _band_edges_ascend_and_span_the_unit_interval(self) -> CalibrationSpec:
+        edges = self.band_edges
+        if any(b <= a for a, b in zip(edges, edges[1:], strict=False)):
+            raise ValueError(f"band edges must ascend: {edges}")
+        if edges[0] != 0.0 or edges[-1] != 1.0:
+            raise ValueError(
+                f"band edges must span [0, 1]; a confidence outside the table "
+                f"has nowhere to be counted. Got {edges[0]} to {edges[-1]}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_map_needs_more_cases_than_a_band(self) -> CalibrationSpec:
+        if self.min_cases_for_fit < self.min_cases_for_band:
+            raise ValueError(
+                f"min_cases_for_fit ({self.min_cases_for_fit}) is below "
+                f"min_cases_for_band ({self.min_cases_for_band}): the whole map "
+                "would be fitted on fewer cases than one band of it needs"
+            )
+        return self
 
 
 class ConfidenceSpec(_Node):
@@ -558,6 +595,7 @@ class Units(_Node):
     pct_places: int = Field(ge=0)
     days_per_week: int = Field(gt=0)
     days_per_year: float = Field(gt=0.0)
+    seconds_per_hour: float = Field(gt=0.0)
 
 
 class Governance(_Node):

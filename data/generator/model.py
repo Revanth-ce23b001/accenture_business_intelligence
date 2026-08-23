@@ -55,7 +55,11 @@ def load_all_configs() -> dict[str, Any]:
         path.stem.replace("scenario_", ""): load_config(path.name)
         for path in sorted(CONFIG_DIR.glob("scenario_*.yaml"))
     }
-    return {"entity": entity, "scenarios": scenarios}
+    return {
+        "entity": entity,
+        "scenarios": scenarios,
+        "calibration": load_config("calibration.yaml"),
+    }
 
 
 # ---------------------------------------------------------------------------

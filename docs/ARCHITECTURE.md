@@ -60,6 +60,15 @@ restated, just located.
 | How each confounder in the causal graph is measured | `semantic_layer/adjudicate.yaml` → `confounder_screen.measures` |
 | Why a hypothesis was eliminated, in one machine-readable word | `engine/adjudicate/gate.py` → `HypothesisVerdict.elimination_reason` |
 | The price/volume/mix split, and why it is LMDI | `engine/contribution/decomposition.py` |
+| What each of s1..s6 measures, and the parameters each one needs | `semantic_layer/adjudication.yaml` → `confidence.components` |
+| Why a cap is a cap and not a seventh component | `engine/confidence/caps.py` |
+| Why the isotonic map is fitted over the whole ledger and never per case type | `engine/confidence/gate.py::_calibration_for` |
+| What is declared about the seeded ledger, and what is measured off it | `data/generator/config/calibration.yaml` |
+| Why the ledger's outcomes are laid out rather than drawn from the RNG | `data/generator/sources_calibration.py` |
+| The eight abstention triggers, as named booleans | `engine/abstain/triggers.py` |
+| Which hypothesis each trigger is evaluated against | `semantic_layer/adjudication.yaml` → `triggers.*.evaluated_against` |
+| The verdict decision table, and the third condition | `engine/abstain/verdict.py::decide` |
+| The organisation's own track record | table `calibration_ledger` |
 | The narrow companion for pipeline metadata, and its allow-list | `engine/db.py::execute_metadata`, `semantic_layer/warehouse.yaml` → `governance.metadata_tables` |
 | Gate 1's five checks and every threshold they use | `semantic_layer/validate.yaml` |
 | Gates 2–5, and the restraint that limits how many cases open | `semantic_layer/qualify.yaml` |
@@ -92,6 +101,12 @@ listed here only so you know they are architectural and not stylistic:
 - **the engine reads no scenario flag.** Which stores an event reached is a conclusion of
   Tests 3, 4 and 5, derived from the cause series; asserted by
   `tests/test_adjudicate.py::test_the_engine_reads_no_scenario_flag`
+- **no model call anywhere under `engine/confidence/` or `engine/abstain/`** — a confidence
+  score is arithmetic and an abstention is a boolean; asserted by
+  `tests/test_confidence.py::test_nothing_under_confidence_or_abstain_imports_the_model_layer`
+- **no cap fires on #2451.** CLAUDE.md warns that reading H2's unverifiability as a confounder
+  of H1 produces 0.85 and is wrong; asserted by
+  `tests/test_confidence.py::test_no_cap_fires_on_2451`
 
 ## Related
 

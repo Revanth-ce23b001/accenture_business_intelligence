@@ -32,24 +32,62 @@ confidence:
       weight: 0.28
       method: sigmoid_abs_did_t_stat
       penalise_when: parallel_trends_pretest_fails
+      # The logistic needs a zero and a unit, and both are stated rather
+      # than fitted. The midpoint is the conventional two-sided 5%
+      # critical value, so a JUST-significant difference-in-differences
+      # scores 0.5 — evidence that could go either way. The scale is one
+      # standard error, so each further standard error moves it up the
+      # curve. Neither number was chosen by looking at what #2451 needed.
+      midpoint_t: 1.96
+      scale_t: 1.0
+      # What a failed parallel-trends pre-test costs. A pre-test failure
+      # does not mean the effect is absent; it means the design cannot
+      # separate the effect from a trend that was already there, and the
+      # strength of the evidence has to fall accordingly.
+      pretest_failure_penalty: 0.30
     s2:
       name: Test coverage
       weight: 0.20
       method: applicable_tests_passed_over_applicable_tests
+      # A test that could not be RUN is not counted either way. It is
+      # neither a pass to be credited nor a failure to be punished, and
+      # counting it as either would let the absence of data change the
+      # score. The count of untestable tests is reported beside the value.
+      not_testable_counts: false
     s3:
       name: Source agreement
       weight: 0.16
       method: structured_unstructured_concordance
+      # Cohen's kappa, not raw agreement. Two lanes that both say "nothing
+      # here" about 106 of 140 stores agree on 89% of the estate without
+      # either of them having found anything, and a score that rewards
+      # that is measuring the size of the estate. Kappa takes the
+      # agreement expected by chance out.
+      statistic: cohens_kappa
+      # Kappa runs from -1 to 1 and confidence from 0 to 1. Negative kappa
+      # is worse than no information, and floors at zero.
+      floor_at_zero: true
     s4:
       name: Data quality
       weight: 0.14
       method: min_over_required_sources_of_freshness_times_completeness
+      # MINIMUM, not mean. A chain is as good as its worst link, and
+      # averaging lets three clean feeds hide one that has not arrived.
+      #
+      # Freshness is scored, not measured in hours: a source that just
+      # landed scores 1, one exactly at its SLA scores 0.5, and one at
+      # this multiple of its SLA scores 0.
+      zero_at_sla_multiple: 2.0
     s5:
       name: Historical depth
       weight: 0.10
       method: min_1_history_weeks_over_reference
       reference_weeks: 52
       regime_change_penalty: 0.15
+      # Measured over the sources this hypothesis REQUIRES, at the
+      # shortest of them. The longest series in the warehouse is no
+      # comfort if the one the argument rests on started in September.
+      scope: required_sources
     s6:
       name: Residual coverage
       weight: 0.12
@@ -86,6 +124,17 @@ confidence:
     publication_floor: 0.70
     max_expected_calibration_error: 0.05
     min_cases_for_band: 5
+
+    # Below this many closed cases the map is the IDENTITY and the answer
+    # is flagged `calibrating`, carrying n. A map fitted to a dozen cases
+    # is a map fitted to noise, and shipping one would be worse than
+    # shipping the raw number: it would look like a correction.
+    min_cases_for_fit: 25
+
+    # The band table the UI prints. Deliberately the plain deciles rather
+    # than anything tuned — the point of the table is that a reader can
+    # check it, and a reader knows what "80-89%" means.
+    band_edges: [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0]
 
 # --------------------------------------------------------------------------
 # Verdict decision table — CLAUDE.md "Verdict decision table"

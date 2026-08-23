@@ -52,6 +52,25 @@ divergence fails loudly the moment the method or the generator moves. No target 
 | Matched-control DiD −4.3 pt | **−4.77 pt**, about one standard error away | `tests/test_adjudicate.py::test_the_did_does_not_reproduce_minus_4_3_exactly` |
 | Parallel-trends pre-test p = 0.41 | **p ≈ 0.74**; both pass, which is the claim | `tests/test_adjudicate.py::test_the_parallel_trends_p_value_is_not_the_registrys_0_41` |
 | H3's price elasticity, fitted from history | not fittable here; **declared**, and labelled as such | `tests/test_adjudicate.py::test_no_price_elasticity_can_be_fitted_from_this_warehouse` |
+| Confidence s1 = 0.93 | **~1.00** — this DiD is at p≈1e-15, not the p≈0.01 the registry's own figure implies | `tests/test_confidence.py::test_s1_saturates_because_this_dids_evidence_is_far_stronger_than_0_93` |
+| Confidence s3 = 0.84 | **~0.60** — Cohen's kappa, not raw agreement | `tests/test_confidence.py::test_s3_is_lower_than_the_registry_because_kappa_is_not_raw_agreement` |
+| Confidence s4 = 0.90 | **1.00** — nothing is stale or incomplete for this hypothesis | `tests/test_confidence.py::test_s4_is_higher_than_the_registry_because_nothing_is_stale` |
+| Confidence s5 = 0.72 | **~0.24** — the WMS feed is 13 weeks long, not the ~37 the target implies | `tests/test_confidence.py::test_s5_is_far_lower_than_the_registry_because_the_wms_feed_is_short` |
+| conf_raw = 0.8876 → published 0.84 | **0.836 → 0.81** | `tests/test_confidence.py::test_the_engines_raw_score_is_pinned_where_it_lands` |
+
+The confidence gaps need reading together. **The formula reproduces 0.8876 exactly** from the six
+values the registry declares — `test_the_formula_reproduces_0_8876_from_the_registry_components`
+asserts it — and **the isotonic map sends 0.8876 to 0.84** as required. What differs is what this
+warehouse's data produces for four of the six components, and the four errors partly cancel: s1 and
+s4 come out above the registry, s3 and s5 below it, and the sum lands about five points low.
+
+s5 is the substantive one and it is a fact about the data, not the method: the generator emits
+inventory snapshots for about thirteen weeks, and the leading hypothesis rests on that feed. The
+registry's 0.72 implies roughly thirty-seven weeks of it.
+
+None of it changes a decision. 0.81 and 0.84 sit on the same side of every threshold in the verdict
+table, the verdict is PARTIALLY EXPLAINED for the same reason either way, and no trigger's answer
+moves — `test_the_verdict_is_unaffected_by_the_gap` asserts exactly that.
 
 The DiD gap is the only substantive one, and it is entirely a question of which 34 of the 106 untreated
 West stores become controls. The engine's optimally matched set grew −2.66% in November, the

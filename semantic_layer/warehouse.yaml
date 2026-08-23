@@ -36,6 +36,7 @@ units:
   # 365 in another is a real class of bug.
   days_per_week: 7
   days_per_year: 365.25
+  seconds_per_hour: 3600.0
 
 # ---------------------------------------------------------------------------
 # Governance. `engine/db.py::execute_governed` is the only path to the
@@ -77,6 +78,11 @@ governance:
     - case_registry
     - kpi_definition_log
     - restatement_register
+    # The engine's own track record. Confidences and outcomes, no
+    # revenue, no store, no customer — there is nothing in it a row
+    # predicate would protect, and every persona needs to see how well
+    # the numbers they are being shown have held up.
+    - calibration_ledger
 
   # execute_governed evaluates the row predicate as an extra column on the
   # wrapped query, then splits kept rows from filtered ones in Python, so

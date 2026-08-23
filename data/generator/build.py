@@ -57,6 +57,9 @@ CRORE = 1e7
 class World:
     entity: dict[str, Any]
     scenarios: dict[str, Any]
+    #: The seeded calibration ledger's layout. Declared counts only; the
+    #: map fitted to them is measured, never written down.
+    calibration: dict[str, Any]
     streams: Streams
     calendar: pd.DataFrame
     stores: pd.DataFrame
@@ -268,6 +271,7 @@ def build_world() -> World:
     configs = load_all_configs()
     entity = configs["entity"]
     scenarios = configs["scenarios"]
+    calibration = configs["calibration"]
     streams = Streams(entity["seed"])
 
     end = date.fromisoformat(entity["timeline"]["end_date"])
@@ -423,6 +427,7 @@ def build_world() -> World:
     world = World(
         entity=entity,
         scenarios=scenarios,
+        calibration=calibration,
         streams=streams,
         calendar=calendar,
         stores=stores,
@@ -641,7 +646,7 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
     statistics, so a reader can see which numbers were solved for and
     which were read back off the data.
     """
-    from data.generator import sources, sources_ops
+    from data.generator import sources, sources_calibration, sources_ops
 
     destination = Path(out) if out else RAW_DIR
     destination.mkdir(parents=True, exist_ok=True)
@@ -667,6 +672,7 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
         sources_ops.emit_competitor_news,
         sources_ops.emit_weather,
         sources_ops.emit_qcomm_weekly,
+        sources_calibration.emit_calibration_ledger,
     ):
         counts.update(emit(world, destination))
 

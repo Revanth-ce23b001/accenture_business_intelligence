@@ -100,6 +100,17 @@ SELECT CAST(week_start AS DATE), week_index, scope,
        dark_stores, orders, fulfilment_rate_pct
 FROM read_csv_auto('{raw}/context/qcomm_weekly.csv');
 
+-- --- the seeded track record ------------------------------------------------
+--
+-- 213 closed cases over the trailing year. The engine fits its isotonic
+-- calibration map to these and computes its own band table from them; not
+-- one of those numbers is written down anywhere.
+
+INSERT INTO calibration_ledger
+SELECT entry_id, case_id, case_type, CAST(closed_at AS TIMESTAMP),
+       confidence_raw, confidence_published, abstained, was_correct, notes
+FROM read_csv_auto('{raw}/calibration/ledger.csv');
+
 -- --- documents -------------------------------------------------------------
 
 INSERT INTO doc_store_notes

@@ -1,0 +1,101 @@
+# The seeded calibration ledger — 213 closed cases over the trailing year.
+#
+# WHAT THIS IS FOR. CLAUDE.md's Number Registry asserts exactly two things
+# about this ledger and deliberately asserts nothing else:
+#
+#     isotonic_map(0.8876) == 0.84 +/- 0.01
+#     expected_calibration_error <= 0.05
+#
+# The band table is NOT specified. It is computed from these cases and
+# printed, because the Round 1 table could not produce the 0.89 -> 0.84
+# step it was supposed to justify. Approximate shape to aim for, reported
+# rather than forced: 90-100% band ~93% accurate, 80-89% ~83%, 70-79%
+# ~74%, 60-69% ~66%, abstention rate ~32%.
+#
+# WHY THE OUTCOMES ARE LAID OUT RATHER THAN DRAWN. A calibration ledger is
+# a FIXTURE: it stands in for a year of closed cases nobody ran. Drawing
+# outcomes from a binomial would make the isotonic map depend on the seed,
+# and the assertion above would then hold by luck. Each band declares how
+# many of its cases were right, and the generator marks exactly that many.
+# What is emergent is everything downstream — the fitted map, the band
+# table, the calibration error — and those are measured, never declared.
+version: 1
+
+window_months: 12
+#: The trailing year ends the day the data does.
+closed_through: "2025-11-30"
+
+totals:
+  published: 145
+  abstained: 68
+  # 213 closed, of which 68 abstained: an abstention rate of about 32%.
+
+# --------------------------------------------------------------------------
+# The raw-confidence bands. These ARE the calibration curve.
+#
+# Two per decile, because the map has to resolve better than a decile: the
+# step this ledger exists to justify is 0.8876 -> 0.84, and a decile-wide
+# band spanning 0.80 to 0.90 cannot say anything specific about 0.8876.
+#
+# `correct` is a COUNT, not a rate. The rates it implies must increase
+# from band to band — isotonic regression pools any band that scores worse
+# than the one below it, and a pooled band is a band the map can no longer
+# distinguish.
+#
+# The band from 0.85 to 0.90 carries the anchor: 21 of 25 is 0.840, and
+# 0.8876 sits inside it.
+# --------------------------------------------------------------------------
+published_bands:
+  - { raw_low: 0.60, raw_high: 0.65, cases: 16, correct: 10 }   # 0.625
+  - { raw_low: 0.65, raw_high: 0.70, cases: 10, correct:  7 }   # 0.700
+  - { raw_low: 0.70, raw_high: 0.75, cases: 18, correct: 13 }   # 0.722
+  - { raw_low: 0.75, raw_high: 0.80, cases: 17, correct: 13 }   # 0.765
+  - { raw_low: 0.80, raw_high: 0.85, cases: 21, correct: 17 }   # 0.810
+  - { raw_low: 0.85, raw_high: 0.90, cases: 25, correct: 21 }   # 0.840  <- the anchor
+  - { raw_low: 0.90, raw_high: 0.95, cases: 22, correct: 20 }   # 0.909
+  - { raw_low: 0.95, raw_high: 1.00, cases: 16, correct: 15 }   # 0.938
+
+#: Where the abstained cases sat before they were abstained. They carry no
+#: outcome — an abstention has nothing to have been right about — so they
+#: are excluded from the map and from the calibration error, and counted
+#: only in the abstention rate. Spread low, because a case that abstains is
+#: usually a case that was not confident.
+abstained_bands:
+  - { raw_low: 0.30, raw_high: 0.45, cases: 21 }
+  - { raw_low: 0.45, raw_high: 0.60, cases: 26 }
+  - { raw_low: 0.60, raw_high: 0.70, cases: 15 }
+  - { raw_low: 0.70, raw_high: 0.80, cases:  6 }
+
+# --------------------------------------------------------------------------
+# Case types. Trigger T7 asks whether the historical calibration FOR THIS
+# CASE TYPE clears the publication floor, so the ledger has to be typed.
+#
+# Two of these decide a scenario:
+#
+#   competitor_attribution   7 of 12 = 58%, below the 70% floor. This is
+#                            what fires T7 on case #2467.
+#   availability_attribution 34 of 38 = 89%, comfortably above it. This is
+#                            why T7 does NOT fire on case #2451.
+#
+# Published counts sum to 145 and correct counts to 116, which is what the
+# bands above produce. The generator refuses to run if they disagree.
+#
+# Types are dealt in the order listed, from cases sorted by raw confidence
+# ascending, so a type listed early draws the least confident cases. That
+# is why competitor attribution is first: those are the cases the
+# organisation is worst at, and they should look it.
+# --------------------------------------------------------------------------
+case_types:
+  competitor_attribution:   { published: 12, correct:  7, abstained: 22 }
+  footfall_attribution:     { published: 16, correct: 12, abstained: 14 }
+  mix_attribution:          { published: 18, correct: 14, abstained: 10 }
+  data_incident:            { published: 16, correct: 12, abstained:  8 }
+  pricing_attribution:      { published: 21, correct: 17, abstained:  8 }
+  promotion_attribution:    { published: 24, correct: 20, abstained:  0 }
+  availability_attribution: { published: 38, correct: 34, abstained:  6 }
+
+#: Case ids for the seeded ledger. Numbered below the live scenarios so a
+#: reader can tell a seeded case from a real one at a glance, and so no
+#: seeded id can ever collide with #2451, #2467 or #2470-#2472.
+case_id_prefix: "C"
+case_id_start: 2000
