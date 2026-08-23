@@ -29,6 +29,23 @@ something here, edit `CLAUDE.md` instead.
 | What "done" means for a step and for the project | **Definition of done** |
 | Performance, cost and offline-demo targets | **Definition of done** |
 
+## Where the code puts things `CLAUDE.md` does not name
+
+`CLAUDE.md` specifies the pipeline but not every file inside it. These are
+decisions the implementation made, recorded here so they are findable — not
+restated, just located.
+
+| Decision | Where it is written down |
+|---|---|
+| The warehouse schema, and which tables exist | `engine/warehouse/schema.sql` |
+| Which raw CSV loads into which table | `engine/warehouse/load.sql` |
+| The four reconciliation problems, and how each is expressed in SQL | `engine/warehouse/views.sql` |
+| What each team means by "revenue", and which definition arbitrates | `semantic_layer/warehouse.yaml` |
+| Row predicates and masked columns, per persona, per KPI | `semantic_layer/kpis/*.yaml` → `access_policy` |
+| The single door to the warehouse | `engine/db.py::execute_governed` |
+| Every disagreement the warehouse found and did not fix | table `data_gap_register` |
+| Every query that reached the warehouse | table `audit_log` |
+
 ## Constraints that shape the code
 
 These are stated as rules in **The ten non-negotiable rules** in `CLAUDE.md`. Read them there in full;

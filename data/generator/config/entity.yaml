@@ -123,10 +123,110 @@ netting:
 # to catch. Removing one silently weakens a demo moment.
 # --------------------------------------------------------------------------
 defects:
-  b2b_share_of_gross: 0.043      # B2B bulk orders sit in the same table
+  b2b_bill_share: 0.043          # share of BILLS that are B2B, in bill_lines
   transfer_share_of_rows: 0.021  # inter-store transfers, not sales
   store_code_changes: 3          # three stores change store_code mid-period
   store_code_change_window: ["2025-04-01", "2025-08-31"]
+
+# --------------------------------------------------------------------------
+# RECONCILIATION TARGETS. Four disagreements the warehouse must expose
+# rather than silently fix. Each is a TARGET the generator solves for; the
+# achieved value is measured back into data/raw/manifest.json.
+# --------------------------------------------------------------------------
+reconciliation:
+
+  # 1. DEFINITION CONFLICT.
+  #    Two systems publish a revenue figure for the same period and neither
+  #    is the KPI contract's:
+  #
+  #      pos_ledger  = retail net + B2B     the POS ledger does not know the
+  #                                         contract's channel exclusion
+  #      marketing   = retail net + returns marketing measures demand at the
+  #                                         till and never deducts a return
+  #
+  #    gap = (pos_ledger - marketing) / marketing = (B2B - returns) / (net + returns)
+  #
+  #    `returns` is already pinned by netting.return_rate, so the generator
+  #    solves the B2B share of net revenue that lands the gap on target.
+  definition_conflict:
+    target_gap_pct: 4.1
+    b2b_lumpiness_sigma: 0.25    # wholesale is lumpy; B2B is not a flat % of every day
+
+  # 2. ENTITY KEY MISMATCH.
+  #    POS keys on store_code, ops keys on outlet_id, and dim_store_xref
+  #    resolves the two. Three stores were re-fasciad and issued new POS
+  #    store_codes; the ops master was never updated, so those codes have no
+  #    xref row and their rows cannot be joined. They are quarantined, not
+  #    dropped, and the quarantined revenue is counted.
+  #
+  #    The generator picks WHICH three stores so the quarantined revenue
+  #    lands on target — the count is given, the share is solved.
+  entity_key_mismatch:
+    target_quarantine_revenue_share: 0.004
+
+  # 3. GRAIN MISMATCH.
+  #    Marketing spend is booked by ISO week; every other fact is daily.
+  #    Allocating it flat within the week is an assumption, not a fact, so
+  #    any evidence derived from the allocation carries this tag.
+  grain_mismatch:
+    allocation: flat_intraweek
+
+  # 4. CALENDAR MISMATCH.
+  #    The Indian fiscal year starts 1 April, so fiscal week 1 starts on
+  #    1 April whatever weekday that is, while the ISO week always starts on
+  #    a Monday. A festival window therefore covers a different share of a
+  #    fiscal week than of an ISO week, and the two calendars disagree about
+  #    which period a festival's trade belongs to.
+  calendar_mismatch:
+    fiscal_year_start_month: 4
+    fiscal_year_start_day: 1
+
+# --------------------------------------------------------------------------
+# Public reviews. The weakest evidence lane (reliability 0.35). Volume is
+# background only — what matters is the competitor-mention count, which
+# scenario_2467.yaml pins.
+# --------------------------------------------------------------------------
+reviews:
+  per_store_over_window: 4.0
+
+# --------------------------------------------------------------------------
+# Personas. These names must match the `access_policy.personas` keys in
+# every KPI contract — engine/db.py::execute_governed resolves a user's
+# persona against the contract, and an unknown persona is a hard error.
+# --------------------------------------------------------------------------
+users:
+  email_domain: meridianfootwear.example
+  roster:
+    - user_id: U001
+      display_name: Ananya Rao
+      persona: cxo
+    - user_id: U002
+      display_name: Vikram Shetty
+      persona: finance_controller
+    - user_id: U003
+      display_name: Priya Menon
+      persona: regional_manager
+      region: West
+    - user_id: U004
+      display_name: Rahul Bose
+      persona: regional_manager
+      region: East
+    - user_id: U005
+      display_name: Sunita Kaur
+      persona: regional_manager
+      region: North
+    - user_id: U006
+      display_name: Arjun Iyer
+      persona: regional_manager
+      region: South
+    - user_id: U007
+      display_name: Farhan Qureshi
+      persona: store_manager
+      region: West
+      store_rank_in_region: 1
+    - user_id: U008
+      display_name: Meera Joshi
+      persona: analyst
 
 # --------------------------------------------------------------------------
 # Footfall instrumentation. Partial by design — this is what makes #2467's

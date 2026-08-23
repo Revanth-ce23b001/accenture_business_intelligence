@@ -1,0 +1,186 @@
+# Warehouse policy.
+#
+# CLAUDE.md rule 2: no threshold lives in Python. This file is where the
+# warehouse's own constants live — unit conversions, the governance
+# bindings `execute_governed` is allowed to fill, and the four
+# reconciliation problems the loaders must expose rather than fix.
+#
+# What is deliberately NOT here: the values the reconciliation produces.
+# The definition gap, the quarantined share and the festival overlaps are
+# COMPUTED from the loaded data (rule 4). Putting an expected figure here
+# would let the engine print a number nobody measured. The registry
+# targets are asserted in tests/, which is where a target belongs.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Unit conversions. Not thresholds, but they are numbers, and rule 2 admits
+# no numbers in engine/ at all — so they live here beside the units the KPI
+# contracts declare.
+# ---------------------------------------------------------------------------
+units:
+  inr_per_crore: 10000000.0
+  inr_per_lakh: 100000.0
+  percent_scale: 100.0
+
+  # Precision at which these quantities are QUOTED, not the precision they
+  # are computed at. Four places on a crore figure is a hundred rupees;
+  # four on a percentage is a hundredth of a basis point. Both are far
+  # finer than anything the UI shows, and exist so a stored evidence value
+  # never rounds away a difference a test is checking for.
+  crore_places: 4
+  pct_places: 4
+
+# ---------------------------------------------------------------------------
+# Governance. `engine/db.py::execute_governed` is the only path to the
+# warehouse (CLAUDE.md rule 5). It resolves the caller's persona against the
+# KPI contract's access_policy, injects that persona's row predicate, and
+# drops that persona's masked columns from the result.
+# ---------------------------------------------------------------------------
+governance:
+  connection_module: engine/db.py
+  audit_table: audit_log
+
+  # A KPI contract's `row_predicate` is written against these bind names.
+  # execute_governed fills them from the authenticated user; a caller that
+  # supplies one itself is refused rather than silently overridden, because
+  # that is exactly how a row filter gets bypassed.
+  reserved_binding_prefix: "user_"
+  reserved_bindings:
+    user_region: region
+    user_store_id: store_id
+    user_persona: persona
+
+  # The predicate that means "no restriction". Written out so the engine
+  # never has to know the string.
+  unrestricted_predicate: "TRUE"
+
+  # execute_governed evaluates the row predicate as an extra column on the
+  # wrapped query, then splits kept rows from filtered ones in Python, so
+  # it can report how many rows the policy removed rather than just how
+  # many survived. This is that column's name; it is stripped before the
+  # result is returned. Leading underscores keep it out of the way of any
+  # real column.
+  visibility_column: "__casefile_row_visible"
+
+# ---------------------------------------------------------------------------
+# RECONCILIATION.
+#
+# Four disagreements exist in the source systems. None is repaired on load.
+# Each is computed, named, and written to `data_gap_register` so it appears
+# in the case file rather than in a footnote.
+# ---------------------------------------------------------------------------
+reconciliation:
+  version: 1
+
+  # 1. DEFINITION CONFLICT ---------------------------------------------------
+  #    Three figures exist for "revenue in period P" and they disagree.
+  #    The KPI contract is the arbiter; the other two are recorded, not
+  #    corrected, because both are defensible inside the team that
+  #    publishes them.
+  definition_conflict:
+    kpi: net_revenue
+    fact_table: fact_sales_daily
+    arbiter: contract
+    definitions:
+      contract:
+        label: Net revenue (KPI contract)
+        owner: finance_controller
+        expression: "SUM(net_revenue_inr)"
+        rationale: >
+          Retail only, transfers excluded, net of returns, discount and
+          tax. This is semantic_layer/kpis/net_revenue.yaml, and it is what
+          a case is opened on.
+      pos_ledger:
+        label: POS ledger revenue (includes B2B)
+        owner: retail_operations_lead
+        expression: "SUM(net_revenue_inr + b2b_net_revenue_inr)"
+        rationale: >
+          Everything that settled through the till, wholesale included.
+          The POS system does not hold the contract's channel exclusion,
+          so its out-of-the-box revenue report is larger by the B2B book.
+      marketing_reported:
+        label: Marketing reported revenue (excludes returns)
+        owner: marketing_lead
+        expression: "SUM(net_revenue_inr + returns_amount_inr)"
+        rationale: >
+          Demand generated at the point of sale. Marketing does not deduct
+          a return, on the argument that a return is a fulfilment failure
+          and not a failure of the campaign that produced the sale.
+    gap:
+      numerator: pos_ledger
+      denominator: marketing_reported
+      unit: pct
+    gap_code: DEFINITION_CONFLICT
+    # Severity is declared, not derived. A definition conflict is a
+    # WARNING because the arbiter resolves it: a case still computes, it
+    # just has to say which figure it used and by how much the others
+    # differ. The key mismatch is an ERROR because revenue is being held
+    # out of every number the warehouse publishes.
+    severity: WARNING
+    shared_exclusion:
+      column: transfer_amount_inr
+      note: >
+        All three definitions exclude inter-store transfers. Carried at
+        daily grain so the exclusion can be shown rather than asserted.
+
+  # 2. ENTITY KEY MISMATCH ---------------------------------------------------
+  #    POS keys on store_code, store operations keys on outlet_id, and
+  #    dim_store_xref is the only bridge. Three stores were re-fasciad, the
+  #    POS system issued new store_codes, and nobody told operations.
+  entity_key_mismatch:
+    pos_key: store_code
+    ops_key: outlet_id
+    bridge_table: dim_store_xref
+    fact_table: fact_sales_daily
+    measure: net_revenue_inr
+    # Quarantine, never drop and never guess. An unmapped row is held
+    # aside, counted, and reported as a share of revenue; imputing the
+    # mapping would make the gap invisible, which is the failure mode.
+    policy: quarantine
+    gap_code: UNMAPPED_STORE_KEY
+    severity: ERROR
+
+  # 3. GRAIN MISMATCH --------------------------------------------------------
+  #    Marketing spend is booked by ISO week. Everything it is compared
+  #    against is daily. Splitting the week evenly is an assumption about
+  #    intra-week spend that nobody has verified, so every value derived
+  #    from the split carries the tag and the tag rides on the Evidence.
+  grain_mismatch:
+    source_table: fact_marketing_spend_weekly
+    source_grain: iso_week
+    target_grain: daily
+    method: flat_intraweek
+    assumption_tag: flat_intraweek
+    days_per_week: 7
+    gap_code: WEEKLY_SPEND_ALLOCATED_FLAT
+    severity: ASSUMPTION
+    note: >
+      Weekend spend almost certainly exceeds Tuesday spend. Until a daily
+      feed exists, the allocation is flat and says so.
+
+  # 4. CALENDAR MISMATCH -----------------------------------------------------
+  #    The fiscal week counts from 1 April whatever weekday that is; the
+  #    ISO week always starts on a Monday. A festival window therefore
+  #    covers a different share of a fiscal period than of an ISO period,
+  #    and the two calendars disagree about which period a festival's trade
+  #    belongs to.
+  calendar_mismatch:
+    calendar_table: dim_calendar
+    date_column: date
+    festival_column: festival
+    festival_flag_column: is_festival
+    gap_code: FISCAL_ISO_WEEK_DIVERGENCE
+    severity: WARNING
+    periods:
+      month:
+        label: Calendar month
+        column: period_month
+      iso_week:
+        label: ISO week
+        column: iso_week_start
+      fiscal_week:
+        label: Fiscal week
+        column: fiscal_week_start
+    # Which pair the divergence headline is quoted between.
+    compare: [iso_week, fiscal_week]

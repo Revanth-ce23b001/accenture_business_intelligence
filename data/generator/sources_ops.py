@@ -448,6 +448,112 @@ def emit_competitor_news(world, out: Path) -> dict[str, int]:
     }
 
 
+REVIEW_PLATFORMS = ["Maps", "AppStore", "Marketplace"]
+
+#: Public review text. The lowest reliability tier there is (0.35), and
+#: the only lane in which a competitor promotion is ever mentioned. #2467
+#: turns on the fact that fourteen of these plus three news items is still
+#: not enough to reach a verdict.
+REVIEW_TEMPLATES = [
+    "Staff were helpful but half the sizes I wanted were gone.",
+    "Nice store, decent range. Billing was quick.",
+    "Prices seem higher than {competitor} down the road right now.",
+    "{competitor} is running a big discount this week, went there instead.",
+    "Saw a {competitor} offer nearby, hard to justify full price here.",
+    "Good collection, will come back.",
+    "Waited a long time at the counter on a Sunday.",
+    "Shoes are comfortable, no complaints.",
+    "Asked for my size twice, they said stock is not there.",
+    "Store is clean and the trial area is good.",
+]
+
+#: The subset above that names a competitor PROMOTION. Counting these is
+#: what produces #2467's "14 review mentions", so they are placed rather
+#: than drawn: background reviews never use them, or the count would be
+#: whatever the noise happened to deal and the case would not be
+#: reproducible. Everything else, including the review that merely
+#: compares prices, is background.
+COMPETITOR_REVIEW_TEMPLATES = REVIEW_TEMPLATES[3:5]
+BACKGROUND_REVIEW_TEMPLATES = [
+    body for body in REVIEW_TEMPLATES if body not in COMPETITOR_REVIEW_TEMPLATES
+]
+
+
+def emit_reviews(world, out: Path) -> dict[str, int]:
+    """Public reviews at store grain — the weakest evidence lane there is.
+
+    Two things matter about this table and neither is the volume:
+
+      * it carries no rating breakdown, no verified-purchase flag and no
+        competitor price, so it can corroborate a hypothesis and never
+        test one
+      * #2467 needs exactly the configured number of reviews naming a
+        competitor promotion in East during the case period, because the
+        whole point of that case is that fourteen weak mentions plus
+        three news items still does not reach a verdict
+
+    The competitor mentions are placed; the background reviews are drawn.
+    """
+    rng = world.streams.fresh("reviews")
+    scenario = world.scenarios["2467"]
+    calendar = world.calendar
+    stores = world.stores
+
+    period = scenario["period"]
+    target_mentions = int(scenario["evidence"]["competitor_review_mentions"])
+    scope = scenario["scope"]
+
+    in_period = calendar["period_month"].to_numpy() == period
+    period_days = calendar["date"].to_numpy()[in_period]
+    all_days = calendar["date"].to_numpy()
+
+    scope_stores = stores[stores["region"] == scope]["store_id"].to_numpy()
+    every_store = stores["store_id"].to_numpy()
+
+    rows = []
+    seq = 0
+
+    # Background: ordinary reviews across the estate and the whole window.
+    background = int(len(every_store) * float(world.entity["reviews"]["per_store_over_window"]))
+    for _ in range(background):
+        seq += 1
+        template = str(rng.choice(BACKGROUND_REVIEW_TEMPLATES))
+        rows.append(
+            {
+                "review_id": f"RV{seq:05d}",
+                "store_id": str(rng.choice(every_store)),
+                "review_date": np.datetime_as_string(
+                    all_days[int(rng.integers(0, len(all_days)))], unit="D"
+                ),
+                "rating": int(rng.integers(1, 6)),
+                "body": template.format(competitor=str(rng.choice(COMPETITORS))),
+                "platform": str(rng.choice(REVIEW_PLATFORMS)),
+            }
+        )
+
+    # #2467: the competitor-promotion mentions, in scope and in period.
+    for _ in range(target_mentions):
+        seq += 1
+        template = str(rng.choice(COMPETITOR_REVIEW_TEMPLATES))
+        rows.append(
+            {
+                "review_id": f"RV{seq:05d}",
+                "store_id": str(rng.choice(scope_stores)),
+                "review_date": np.datetime_as_string(
+                    period_days[int(rng.integers(0, len(period_days)))], unit="D"
+                ),
+                "rating": int(rng.integers(1, 4)),
+                "body": template.format(competitor=str(rng.choice(COMPETITORS))),
+                "platform": str(rng.choice(REVIEW_PLATFORMS)),
+            }
+        )
+
+    frame = pd.DataFrame(rows).sort_values(
+        ["review_date", "review_id"], kind="stable"
+    ).reset_index(drop=True)
+    return {"store_ops/reviews.csv": write_csv(frame, out / "store_ops" / "reviews.csv")}
+
+
 def emit_weather(world, out: Path) -> dict[str, int]:
     """Daily weather at city grain."""
     rng = world.streams.fresh("weather")

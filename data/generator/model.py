@@ -32,6 +32,12 @@ CONFIG_DIR = Path(__file__).parent / "config"
 
 REGIONS = ("North", "South", "East", "West")
 
+#: Default fiscal-year anchor. `build_calendar` takes an override from
+#: entity.yaml -> reconciliation.calendar_mismatch, which is where the
+#: calendar mismatch is declared; this pair is the fallback so the calendar
+#: can still be built standalone in a test.
+FISCAL_YEAR_START = (4, 1)  # April, 1st
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -160,7 +166,9 @@ FESTIVAL_REGION_INTENSITY = {
 }
 
 
-def build_calendar(start: date, end: date) -> pd.DataFrame:
+def build_calendar(
+    start: date, end: date, fiscal_year_start: tuple[int, int] = FISCAL_YEAR_START
+) -> pd.DataFrame:
     """Gregorian plus fiscal plus festival, one row per day."""
     days = pd.date_range(start, end, freq="D")
     frame = pd.DataFrame({"date": days})
@@ -173,11 +181,28 @@ def build_calendar(start: date, end: date) -> pd.DataFrame:
     frame["period_month"] = frame["date"].dt.strftime("%Y-%m")
 
     # Indian fiscal year runs April to March.
-    frame["fiscal_year"] = np.where(
-        frame["month"] >= 4, frame["year"], frame["year"] - 1
+    fy_month, fy_day = fiscal_year_start
+    started = (frame["month"] > fy_month) | (
+        (frame["month"] == fy_month) & (frame["day"] >= fy_day)
     )
+    frame["fiscal_year"] = np.where(started, frame["year"], frame["year"] - 1)
     frame["fiscal_year_label"] = frame["fiscal_year"].map(lambda y: f"FY{y % 100:02d}-{(y + 1) % 100:02d}")
-    frame["fiscal_quarter"] = ((frame["month"] - 4) % 12) // 3 + 1
+    frame["fiscal_quarter"] = ((frame["month"] - fy_month) % 12) // 3 + 1
+
+    # CALENDAR MISMATCH, generated rather than asserted. The fiscal week
+    # counts from 1 April whatever weekday that is; the ISO week always
+    # starts on a Monday. The two therefore cut the year in different
+    # places, and a festival window lands on different periods under each.
+    fiscal_start = pd.to_datetime(
+        dict(year=frame["fiscal_year"], month=fy_month, day=fy_day)
+    )
+    frame["fiscal_week"] = ((frame["date"] - fiscal_start).dt.days // 7 + 1).astype(int)
+    frame["fiscal_week_start"] = (
+        fiscal_start + pd.to_timedelta((frame["fiscal_week"] - 1) * 7, unit="D")
+    ).dt.strftime("%Y-%m-%d")
+    frame["iso_week_start"] = (
+        frame["date"] - pd.to_timedelta(frame["date"].dt.dayofweek, unit="D")
+    ).dt.strftime("%Y-%m-%d")
 
     frame["is_weekend"] = frame["dow"] >= 5
     frame["is_month_end"] = frame["date"].dt.is_month_end
@@ -254,7 +279,11 @@ def build_stores(entity: dict[str, Any], streams: Streams) -> pd.DataFrame:
             rows.append(
                 {
                     "store_id": f"S{store_seq:04d}",
+                    # POS keys on store_code; store operations keys on
+                    # outlet_id. The two systems were never merged, and
+                    # dim_store_xref is the only bridge between them.
                     "store_code": f"{region[:2].upper()}-{store_seq:04d}",
+                    "outlet_id": f"OPS-{store_seq + 1000:05d}",
                     "region": region,
                     "city": str(city[i]),
                     "store_format": str(fmt[i]),

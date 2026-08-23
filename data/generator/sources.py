@@ -11,7 +11,11 @@ has something real to catch:
     same-day join understates them
   * B2B bulk orders sit in the same table as retail sales
   * three stores change store_code mid-period, so a naive group-by
-    splits them in two
+    splits them in two -- and dim_store_xref never learned the new
+    codes, so a join to the operations key drops them entirely
+  * the POS ledger books B2B in the same table, and marketing's revenue
+    figure never deducts a return, so three revenue figures exist for
+    the same period and none of them is silently reconciled
   * the ticket `category` field is unreliable — the body is the truth
   * store notes carry no tags, and are written in English and Hinglish
   * footfall is null for 109 of 140 West stores
@@ -44,9 +48,19 @@ def write_csv(frame: pd.DataFrame, path: Path) -> int:
 
 
 def emit_dimensions(world, out: Path) -> dict[str, int]:
+    """Entity masters.
+
+    `dim_store` is the STORE OPERATIONS master and carries `outlet_id`,
+    the key that system issues. It deliberately does NOT carry the POS
+    `store_code`: the only mapping the organisation maintains between the
+    two systems is `dim_store_xref`, and duplicating it here would give
+    the warehouse a private second copy that could never go stale — which
+    is precisely the failure this data set exists to make visible.
+    """
     stores = world.stores.copy()
     stores["is_treated_2451"] = world.mechanism.treated_mask
     stores["is_matched_control_2451"] = world.mechanism.control_mask
+    stores = stores.drop(columns=["store_code"])
     stores = stores.sort_values("store_id").reset_index(drop=True)
 
     skus = world.skus.copy().sort_values("sku_id").reset_index(drop=True)
@@ -70,8 +84,44 @@ def _net_asp(world) -> float:
     return gross * (1.0 - netting["discount_rate_mean"]) * (1.0 - netting["tax_rate"])
 
 
+def store_code_on(world) -> np.ndarray:
+    """POS store_code per (store, day), honouring the re-fascia.
+
+    Three stores were issued a new store_code when their fascia changed,
+    and the POS system started stamping the new code that day. Nothing
+    told store operations, so `dim_store_xref` has no row for the new
+    code and those rows cannot be joined -- see `emit_store_xref`.
+    """
+    n_stores, n_days = world.actual.shape
+    codes = np.repeat(world.stores["store_code"].to_numpy()[:, None], n_days, axis=1)
+    if not world.refascia_codes:
+        return codes
+    after = world.calendar["date"].to_numpy() >= np.datetime64(world.refascia_cutover)
+    positions = {sid: i for i, sid in enumerate(world.stores["store_id"].to_numpy())}
+    for store_id, new_code in world.refascia_codes.items():
+        codes[positions[store_id], after] = new_code
+    return codes
+
+
 def emit_sales_daily(world, out: Path) -> dict[str, int]:
-    """Authoritative store x day net revenue. Every statistic reads this."""
+    """Authoritative store x day net revenue. Every statistic reads this.
+
+    `net_revenue_inr` is the KPI contract's figure: retail only, no
+    transfers, net of returns, discount and tax. The columns beside it are
+    what the contract had to arbitrate between, and they are carried so
+    the arbitration is reproducible rather than asserted:
+
+      returns_amount_inr    marketing's figure never deducts this
+      b2b_net_revenue_inr   the POS ledger's figure includes this
+      transfer_amount_inr   both definitions exclude this; carried so the
+                            second scope exclusion is visible at this grain
+
+    The identity `gross - returns - discount - tax = net` holds EXACTLY in
+    the emitted CSV, not to within rounding: gross is computed back from
+    the already-rounded components.
+    """
+    entity = world.entity
+    netting = entity["netting"]
     stores = world.stores
     calendar = world.calendar
     n_stores, n_days = world.actual.shape
@@ -79,24 +129,118 @@ def emit_sales_daily(world, out: Path) -> dict[str, int]:
     store_ids = np.repeat(stores["store_id"].to_numpy(), n_days)
     regions = np.repeat(stores["region"].to_numpy(), n_days)
     dates = np.tile(calendar["date"].dt.strftime("%Y-%m-%d").to_numpy(), n_stores)
-    net = world.actual.reshape(-1)
+    net = np.round(world.actual.reshape(-1), 2)
     expected = world.expected.reshape(-1)
 
     asp = _net_asp(world)
     units = np.round(net / asp).astype(np.int64)
 
+    # Unwind the netting. net = taxable * (1 - tax - return_rate), where
+    # taxable = gross * (1 - discount), so every component follows from net.
+    tax_rate = float(netting["tax_rate"])
+    return_rate = float(netting["return_rate"])
+    discount_rate = float(netting["discount_rate_mean"])
+    taxable = net / (1.0 - tax_rate - return_rate)
+    tax = np.round(taxable * tax_rate, 2)
+    returns = np.round(taxable * return_rate, 2)
+    discount = np.round(taxable * discount_rate / (1.0 - discount_rate), 2)
+    gross = np.round(net + returns + discount + tax, 2)
+
+    # B2B wholesale, booked to the same store in the same ledger. Lumpy,
+    # then rescaled so the national total lands on the solved share -- the
+    # gap between the two rival definitions is a target, not a coincidence.
+    reconciliation = entity["reconciliation"]
+    rng = world.streams.fresh("b2b_daily")
+    sigma = float(reconciliation["definition_conflict"]["b2b_lumpiness_sigma"])
+    jitter = np.exp(rng.normal(-0.5 * sigma * sigma, sigma, size=net.shape))
+    b2b = net * jitter
+    b2b = np.round(b2b * (world.fitted_b2b_share * net.sum() / b2b.sum()), 2)
+
+    transfer_jitter = np.exp(rng.normal(-0.5 * sigma * sigma, sigma, size=net.shape))
+    transfer = np.round(
+        gross * float(entity["defects"]["transfer_share_of_rows"]) * transfer_jitter, 2
+    )
+
     frame = pd.DataFrame(
         {
             "store_id": store_ids,
+            "store_code": store_code_on(world).reshape(-1),
             "region": regions,
             "txn_date": dates,
-            "net_revenue_inr": np.round(net, 2),
+            "gross_amount_inr": gross,
+            "returns_amount_inr": returns,
+            "discount_amount_inr": discount,
+            "tax_amount_inr": tax,
+            "net_revenue_inr": net,
+            "b2b_net_revenue_inr": b2b,
+            "transfer_amount_inr": transfer,
             "units": units,
             "calendar_expected_inr": np.round(expected, 2),
         }
     ).sort_values(["store_id", "txn_date"], kind="stable").reset_index(drop=True)
 
     return {"pos_erp/sales_daily.csv": write_csv(frame, out / "pos_erp" / "sales_daily.csv")}
+
+
+def emit_store_xref(world, out: Path) -> dict[str, int]:
+    """The only bridge between the POS key and the operations key.
+
+    POS facts key on `store_code`; store operations, footfall and the
+    inventory system key on `outlet_id`. This table maps one to the other.
+
+    It is deliberately INCOMPLETE. The three re-fasciad stores were issued
+    new POS store_codes and nobody told operations, so no row here covers
+    them. A join through this table drops those rows, and the warehouse
+    quarantines and counts them rather than silently losing them. The new
+    codes appear nowhere in this file: the gap has to be found by the join
+    failing, not by being told about it.
+    """
+    stores = world.stores
+    frame = pd.DataFrame(
+        {
+            "outlet_id": stores["outlet_id"].to_numpy(),
+            "store_code": stores["store_code"].to_numpy(),
+            "valid_from": world.calendar["date"].min().strftime("%Y-%m-%d"),
+            "valid_to": "",
+            "mapping_source": "ops_master",
+        }
+    ).sort_values("outlet_id", kind="stable").reset_index(drop=True)
+    return {"dim/dim_store_xref.csv": write_csv(frame, out / "dim" / "dim_store_xref.csv")}
+
+
+def emit_users(world, out: Path) -> dict[str, int]:
+    """The personas `execute_governed` resolves an access policy against.
+
+    `persona` must be a key in every KPI contract's `access_policy`, and
+    `region` / `store_id` are what the contract's row predicate binds to.
+    A regional manager with no region would silently see everything.
+    """
+    cfg = world.entity["users"]
+    stores = world.stores
+    domain = cfg["email_domain"]
+
+    rows = []
+    for entry in cfg["roster"]:
+        region = entry.get("region")
+        store_id = ""
+        if "store_rank_in_region" in entry:
+            in_region = stores[stores["region"] == region].sort_values(
+                "store_id", kind="stable"
+            )
+            store_id = str(in_region["store_id"].iloc[int(entry["store_rank_in_region"]) - 1])
+        handle = entry["display_name"].lower().replace(" ", ".")
+        rows.append(
+            {
+                "user_id": entry["user_id"],
+                "display_name": entry["display_name"],
+                "email": f"{handle}@{domain}",
+                "persona": entry["persona"],
+                "region": region if region else "",
+                "store_id": store_id,
+            }
+        )
+    frame = pd.DataFrame(rows).sort_values("user_id", kind="stable").reset_index(drop=True)
+    return {"dim/dim_user.csv": write_csv(frame, out / "dim" / "dim_user.csv")}
 
 
 def emit_sales_daily_sku(world, out: Path) -> dict[str, int]:
@@ -198,14 +342,11 @@ def emit_bill_lines(world, out: Path) -> dict[str, int]:
     sku_p = (skus["demand_share"] / skus["demand_share"].sum()).to_numpy()
     prices = dict(zip(skus["sku_id"], skus["list_price_inr"], strict=True))
 
-    # Three stores change store_code mid-period.
-    changed = stores["store_id"].to_numpy()[
-        rng.choice(len(stores), size=int(defects["store_code_changes"]), replace=False)
-    ]
-    change_from = np.datetime64(defects["store_code_change_window"][0])
-    new_codes = {
-        sid: f"RC-{i + 1:03d}-{sid[1:]}" for i, sid in enumerate(sorted(changed))
-    }
+    # Three stores change store_code mid-period. WHICH three is decided in
+    # build.py, where the resulting quarantine can be measured against its
+    # target; this table only stamps the codes the POS system issued.
+    new_codes = dict(world.refascia_codes)
+    change_from = np.datetime64(world.refascia_cutover)
 
     records: list[tuple] = []
     open_h = int(entity["trade"]["open_hour_ist"])
@@ -232,7 +373,7 @@ def emit_bill_lines(world, out: Path) -> dict[str, int]:
                 if sid in new_codes and day >= change_from:
                     code = new_codes[sid]
 
-                is_b2b = rng.random() < defects["b2b_share_of_gross"]
+                is_b2b = rng.random() < defects["b2b_bill_share"]
                 is_transfer = (not is_b2b) and rng.random() < defects["transfer_share_of_rows"]
                 channel = "B2B" if is_b2b else "RETAIL"
                 txn_type = "TRANSFER" if is_transfer else "SALE"

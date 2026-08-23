@@ -16,7 +16,9 @@ Design constraints taken from CLAUDE.md:
   rule 3  No bare floats leave the engine. Case-level quantities on
           `Adjudication` and `Recommendation` are typed `Evidence`, not
           `float`, so the UI can always link a displayed number to its
-          derivation.
+          derivation. A value that rests on an unverified assumption
+          carries it in `Evidence.assumptions`, so the assumption travels
+          with the number instead of being lost on the way to the screen.
   rule 6  Abstention is architectural. `TriggerId` is a closed set evaluated
           outside the model.
   rule 7  Contribution (WHERE) and causation (WHY) stay separate. There is no
@@ -155,6 +157,16 @@ class Evidence(_Contract):
     )
 
     lineage: tuple[LineageStep, ...] = Field(default=())
+
+    assumptions: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Named assumptions this value depends on, e.g. 'flat_intraweek' for a figure "
+            "derived from weekly spend allocated evenly across a week. Carried on the "
+            "evidence rather than in prose so the UI can show it beside the number and a "
+            "test can assert it is present."
+        ),
+    )
     notes: str | None = Field(default=None)
 
     @model_validator(mode="after")

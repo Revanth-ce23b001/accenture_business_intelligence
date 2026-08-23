@@ -24,6 +24,21 @@ thing to keep in sync, so this page only tells you where to look.
 | The per-component confidence inputs for the worked case | **Confidence specification**, the `#2451` column |
 | Which Round 1 figures changed, and what they were before | **Resolved defects — changelog from the Round 1 material** |
 
+## Targets that are NOT in the registry
+
+Two figures were introduced by the P4 warehouse brief and are not in `CLAUDE.md`'s Number Registry,
+because that section predates them. They are targets in exactly the same sense — declared in the
+generator config, solved for by the generator, and asserted against the loaded warehouse — so they
+are listed here by location, not by value.
+
+| Target | Declared in | Asserted by |
+|---|---|---|
+| The gap between the POS ledger's revenue definition and marketing's | `data/generator/config/entity.yaml` → `reconciliation.definition_conflict` | `tests/test_reconciliation.py` |
+| The share of revenue quarantined by the unresolvable store keys | `data/generator/config/entity.yaml` → `reconciliation.entity_key_mismatch` | `tests/test_reconciliation.py` |
+
+Both are also measured back into `data/raw/manifest.json` under `measured`, alongside every other
+emergent figure, so a reader can see what the generator achieved rather than what it aimed at.
+
 ## Rules that govern this registry
 
 Stated in full in **The ten non-negotiable rules** in `CLAUDE.md`:

@@ -544,6 +544,180 @@ class AdjudicationConfig(_Node):
 
 
 # ---------------------------------------------------------------------------
+# Warehouse policy
+# ---------------------------------------------------------------------------
+
+
+class Units(_Node):
+    """Unit conversions. Rule 2 admits no numbers in engine/ at all."""
+
+    inr_per_crore: float = Field(gt=0.0)
+    inr_per_lakh: float = Field(gt=0.0)
+    percent_scale: float = Field(gt=0.0)
+    crore_places: int = Field(ge=0)
+    pct_places: int = Field(ge=0)
+
+
+class Governance(_Node):
+    """How `engine/db.py::execute_governed` binds a persona to a query."""
+
+    connection_module: str
+    audit_table: str
+    reserved_binding_prefix: str = Field(min_length=1)
+    reserved_bindings: dict[str, str] = Field(min_length=1)
+    unrestricted_predicate: str = Field(min_length=1)
+    visibility_column: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _reserved_bindings_carry_the_prefix(self) -> Governance:
+        """A binding the engine fills must be recognisable as one.
+
+        `execute_governed` refuses any caller-supplied parameter starting
+        with the prefix. If a reserved name did not carry it, a caller
+        could supply that name and overwrite the row filter.
+        """
+        for name in self.reserved_bindings:
+            if not name.startswith(self.reserved_binding_prefix):
+                raise ValueError(
+                    f"reserved binding {name!r} does not start with "
+                    f"{self.reserved_binding_prefix!r}; a caller could then supply it"
+                )
+        return self
+
+
+class RevenueDefinition(_Node):
+    """One team's answer to 'what was revenue in period P'."""
+
+    label: str
+    owner: str
+    expression: str = Field(min_length=1, description="SQL aggregate over the fact table")
+    rationale: str = Field(min_length=1)
+
+
+class DefinitionGap(_Node):
+    numerator: str
+    denominator: str
+    unit: str
+
+
+#: How loudly a gap is reported. Declared per problem in warehouse.yaml
+#: rather than derived from a size, because "how bad is this" is a
+#: business judgement and not a quantity the warehouse can measure.
+Severity = Literal["ASSUMPTION", "WARNING", "ERROR"]
+
+
+class SharedExclusion(_Node):
+    column: str
+    note: str
+
+
+class DefinitionConflict(_Node):
+    kpi: str
+    fact_table: str
+    arbiter: str
+    definitions: dict[str, RevenueDefinition] = Field(min_length=2)
+    gap: DefinitionGap
+    gap_code: str
+    severity: Severity
+    shared_exclusion: SharedExclusion
+
+    @model_validator(mode="after")
+    def _references_resolve(self) -> DefinitionConflict:
+        for role, name in (
+            ("arbiter", self.arbiter),
+            ("gap.numerator", self.gap.numerator),
+            ("gap.denominator", self.gap.denominator),
+        ):
+            if name not in self.definitions:
+                raise ValueError(
+                    f"{role} names {name!r}, which is not one of the definitions "
+                    f"({sorted(self.definitions)})"
+                )
+        if self.gap.numerator == self.gap.denominator:
+            raise ValueError("the definition gap compares a definition with itself")
+        return self
+
+
+class EntityKeyMismatch(_Node):
+    pos_key: str
+    ops_key: str
+    bridge_table: str
+    fact_table: str
+    measure: str
+    policy: Literal["quarantine"]
+    gap_code: str
+    severity: Severity
+
+
+class GrainMismatch(_Node):
+    source_table: str
+    source_grain: str
+    target_grain: str
+    method: str
+    assumption_tag: str = Field(min_length=1)
+    days_per_week: int = Field(gt=0)
+    gap_code: str
+    severity: Severity
+    note: str
+
+
+class CalendarPeriod(_Node):
+    label: str
+    column: str
+
+
+class CalendarMismatch(_Node):
+    calendar_table: str
+    date_column: str
+    festival_column: str
+    festival_flag_column: str
+    gap_code: str
+    severity: Severity
+    periods: dict[str, CalendarPeriod] = Field(min_length=2)
+    compare: list[str] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def _compared_periods_exist(self) -> CalendarMismatch:
+        for name in self.compare:
+            if name not in self.periods:
+                raise ValueError(
+                    f"calendar_mismatch compares {name!r}, which is not a declared period "
+                    f"({sorted(self.periods)})"
+                )
+        if self.compare[0] == self.compare[1]:
+            raise ValueError("calendar_mismatch compares a calendar with itself")
+        return self
+
+
+class Reconciliation(_Node):
+    """The four disagreements the warehouse exposes rather than repairs."""
+
+    version: int = Field(ge=1)
+    definition_conflict: DefinitionConflict
+    entity_key_mismatch: EntityKeyMismatch
+    grain_mismatch: GrainMismatch
+    calendar_mismatch: CalendarMismatch
+
+    def gap_codes(self) -> list[str]:
+        """Every code this warehouse can raise. One per problem."""
+        return sorted(
+            {
+                self.definition_conflict.gap_code,
+                self.entity_key_mismatch.gap_code,
+                self.grain_mismatch.gap_code,
+                self.calendar_mismatch.gap_code,
+            }
+        )
+
+
+class WarehouseConfig(_Node):
+    version: int = Field(ge=1)
+    units: Units
+    governance: Governance
+    reconciliation: Reconciliation
+
+
+# ---------------------------------------------------------------------------
 # The whole layer
 # ---------------------------------------------------------------------------
 
@@ -554,6 +728,7 @@ class SemanticLayer(_Node):
     playbooks: dict[str, Playbook]
     recovery_curves: RecoveryCurves
     adjudication: AdjudicationConfig
+    warehouse: WarehouseConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -622,6 +797,18 @@ class SemanticLayer(_Node):
                 raise ValueError(
                     f"confidence cap {key!r} forces unknown trigger {cap.forced_trigger!r}"
                 )
+
+        conflict = self.warehouse.reconciliation.definition_conflict
+        if conflict.kpi not in kpi_names:
+            raise ValueError(
+                f"the definition conflict arbitrates {conflict.kpi!r}, which is not a KPI"
+            )
+        # The arbiter's expression is the contract's, so a change to one that
+        # is not made to the other would let the warehouse publish a figure
+        # the KPI contract does not recognise.
+        for name, definition in conflict.definitions.items():
+            if not definition.expression.strip():
+                raise ValueError(f"revenue definition {name!r} has no expression")
 
         return self
 
@@ -706,6 +893,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     graph_path = base / "causal_graph.yaml"
     curves_path = base / "recovery_curves.yaml"
     adjudication_path = base / "adjudication.yaml"
+    warehouse_path = base / "warehouse.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -715,6 +903,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
         "adjudication": _build(
             AdjudicationConfig, _read_yaml(adjudication_path), adjudication_path
         ),
+        "warehouse": _build(WarehouseConfig, _read_yaml(warehouse_path), warehouse_path),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -740,16 +929,26 @@ __all__ = [
     "AccessPolicy",
     "AdjudicationConfig",
     "Baseline",
+    "CalendarMismatch",
     "CausalGraph",
     "CostModel",
+    "DefinitionConflict",
+    "EntityKeyMismatch",
+    "Governance",
+    "GrainMismatch",
     "HypothesisTemplate",
     "KpiContract",
     "Materiality",
     "Playbook",
+    "Reconciliation",
+    "Severity",
     "RecoveryCurve",
     "RecoveryCurves",
+    "RevenueDefinition",
     "SemanticLayer",
     "SemanticLayerError",
+    "Units",
+    "WarehouseConfig",
     "get_semantic_layer",
     "load_semantic_layer",
     "load_timed",

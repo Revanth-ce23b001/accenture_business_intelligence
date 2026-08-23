@@ -70,6 +70,18 @@ class World:
     amplitude_achieved: dict[str, float] = field(default_factory=dict)
     fitted_dose_sigma: float = 0.0
 
+    #: RECONCILIATION 2 — store_id -> the NEW POS store_code issued at the
+    #: re-fascia. These codes exist in the POS facts and in no xref row,
+    #: which is what makes them unjoinable and therefore quarantined.
+    #: Deliberately not written to dim_store: the warehouse has to
+    #: DISCOVER the gap by failing to join, not be told about it.
+    refascia_codes: dict[str, str] = field(default_factory=dict)
+    refascia_cutover: str = ""
+
+    #: RECONCILIATION 1 — B2B net revenue as a share of retail net revenue,
+    #: solved so the two rival definitions differ by the configured gap.
+    fitted_b2b_share: float = 0.0
+
     # -- helpers ----------------------------------------------------------
 
     def region_month(self, matrix: np.ndarray, region: str, period: str) -> float:
@@ -264,7 +276,15 @@ def build_world() -> World:
     # yields 549 -- anchor on the first of the month instead.
     months = int(entity["timeline"]["months"])
     start = (pd.Timestamp(end).replace(day=1) - pd.DateOffset(months=months - 1)).date()
-    calendar = build_calendar(start, end)
+    fiscal = entity["reconciliation"]["calendar_mismatch"]
+    calendar = build_calendar(
+        start,
+        end,
+        fiscal_year_start=(
+            int(fiscal["fiscal_year_start_month"]),
+            int(fiscal["fiscal_year_start_day"]),
+        ),
+    )
 
     stores = build_stores(entity, streams)
     stores = assign_footfall_counters(stores, entity, streams)
@@ -415,8 +435,117 @@ def build_world() -> World:
     world.fitted_dose_sigma = fitted_sigma
     world.diagnostics = {}
     world.amplitude_achieved = amplitude_achieved
+
+    # --- 9. reconciliation parameters ----------------------------------
+    beta, _rho = solve_b2b_share(entity)
+    world.fitted_b2b_share = beta
+
+    refascia_ids, cutover, _achieved = select_refascia_stores(actual, stores, calendar, entity)
+    world.refascia_cutover = cutover
+    world.refascia_codes = {
+        sid: f"RC-{i + 1:03d}-{sid[1:]}" for i, sid in enumerate(refascia_ids)
+    }
+
     world.diagnostics = _diagnose(world)
     return world
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation solves
+#
+# Neither of these assigns a value. Each picks the one free parameter that
+# lands a declared target, and the achieved figure is measured back out in
+# `_diagnose` so a reader can see the difference between the two.
+# ---------------------------------------------------------------------------
+
+
+def solve_b2b_share(entity: dict[str, Any]) -> tuple[float, float]:
+    """Solve the B2B share of net revenue that lands the definition gap.
+
+    The two rival figures for the same period are
+
+        pos_ledger = net + b2b        (POS does not apply the contract's
+                                       channel exclusion)
+        marketing  = net + returns    (marketing never deducts a return)
+
+    so, writing beta = b2b/net and rho = returns/net,
+
+        gap = (beta - rho) / (1 + rho)   ==>   beta = gap * (1 + rho) + rho
+
+    `rho` is not free: it falls out of the netting already configured.
+    A bill's return credits the discounted, pre-tax value, so
+
+        net     = gross * (1 - discount) * (1 - tax - return_rate)
+        returns = gross * (1 - discount) * return_rate
+        rho     = return_rate / (1 - tax - return_rate)
+
+    Returns (beta, rho).
+    """
+    netting = entity["netting"]
+    tax = float(netting["tax_rate"])
+    return_rate = float(netting["return_rate"])
+    denominator = 1.0 - tax - return_rate
+    if denominator <= 0.0:
+        raise ValueError(
+            f"netting leaves no net revenue: tax {tax} + return_rate {return_rate} >= 1"
+        )
+    rho = return_rate / denominator
+
+    gap = float(entity["reconciliation"]["definition_conflict"]["target_gap_pct"]) / 100.0
+    beta = gap * (1.0 + rho) + rho
+    return beta, rho
+
+
+def select_refascia_stores(
+    actual: np.ndarray,
+    stores: pd.DataFrame,
+    calendar: pd.DataFrame,
+    entity: dict[str, Any],
+) -> tuple[list[str], str, float]:
+    """Pick WHICH stores are re-fasciad so the quarantine lands on target.
+
+    The COUNT is given by the business (three stores were re-fasciad); the
+    revenue share that ends up unjoinable is a consequence of which three,
+    and that is what is solved for here. Nothing is scaled and no revenue
+    is moved — the search only chooses stores.
+
+    Returns (store_ids, cutover_date, achieved_share).
+    """
+    defects = entity["defects"]
+    n = int(defects["store_code_changes"])
+    cutover = str(defects["store_code_change_window"][0])
+    target = float(
+        entity["reconciliation"]["entity_key_mismatch"]["target_quarantine_revenue_share"]
+    )
+
+    after = calendar["date"].to_numpy() >= np.datetime64(cutover)
+    per_store = actual[:, after].sum(axis=1)
+    share = per_store / actual.sum()
+
+    order = np.argsort(share, kind="stable")          # ascending, ties by index
+    sorted_share = share[order]
+    cumulative_best: tuple[float, tuple[int, ...]] | None = None
+
+    # Every unordered pair, then the best third by binary search. O(n^2 log n)
+    # over 412 stores is a few hundred thousand operations.
+    for a in range(len(order) - n + 1):
+        for b in range(a + 1, len(order)):
+            wanted = target - sorted_share[a] - sorted_share[b]
+            c = int(np.searchsorted(sorted_share, wanted))
+            for candidate in (c - 1, c, c + 1):
+                if candidate <= b or candidate >= len(order):
+                    continue
+                total = sorted_share[a] + sorted_share[b] + sorted_share[candidate]
+                key = (abs(total - target), (a, b, candidate))
+                if cumulative_best is None or key < cumulative_best:
+                    cumulative_best = key
+    if cumulative_best is None:  # pragma: no cover - needs fewer than 3 stores
+        raise ValueError("cannot choose re-fascia stores: fewer stores than the target count")
+
+    picked = [int(order[i]) for i in cumulative_best[1]]
+    achieved = float(share[picked].sum())
+    store_ids = sorted(stores["store_id"].to_numpy()[picked].tolist())
+    return store_ids, cutover, achieved
 
 
 def _region_month_cr(
@@ -479,6 +608,21 @@ def _diagnose(world: World) -> dict[str, Any]:
     out["avail_treated_after_pct"] = float(
         avail[world.mechanism.treated_mask, :][:, settled].mean() * 100.0
     )
+
+    # --- reconciliation, measured -------------------------------------
+    _, rho = solve_b2b_share(world.entity)
+    beta = world.fitted_b2b_share
+    out["returns_share_of_net"] = float(rho)
+    out["b2b_share_of_net"] = float(beta)
+    out["definition_gap_pct"] = float((beta - rho) / (1.0 + rho) * 100.0)
+
+    after = world.calendar["date"].to_numpy() >= np.datetime64(world.refascia_cutover)
+    refascia_rows = world.stores["store_id"].isin(world.refascia_codes).to_numpy()
+    out["refascia_stores"] = sorted(world.refascia_codes)
+    out["refascia_cutover"] = world.refascia_cutover
+    out["quarantine_revenue_share"] = float(
+        world.actual[np.ix_(refascia_rows, after)].sum() / world.actual.sum()
+    )
     return out
 
 
@@ -504,6 +648,8 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for emit in (
         sources.emit_dimensions,
+        sources.emit_store_xref,
+        sources.emit_users,
         sources.emit_sales_daily,
         sources.emit_sales_daily_sku,
         sources.emit_bill_lines,
@@ -511,6 +657,7 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
         sources_ops.emit_inventory_snapshot,
         sources_ops.emit_store_notes,
         sources_ops.emit_tickets,
+        sources_ops.emit_reviews,
         sources_ops.emit_footfall,
         sources_ops.emit_calendar,
         sources_ops.emit_marketing_spend,
@@ -526,6 +673,8 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
             "festival_amplitudes": world.festival_amplitudes,
             "availability_elasticity_beta": world.fitted_beta,
             "idiosyncratic_sigma": world.fitted_dose_sigma,
+            "b2b_share_of_net_revenue": world.fitted_b2b_share,
+            "refascia_store_ids": sorted(world.refascia_codes),
         },
         "measured": world.diagnostics,
         "row_counts": counts,

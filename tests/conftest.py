@@ -1,8 +1,12 @@
-"""Shared builders for the contract and provider tests.
+"""Shared builders and fixtures.
 
-The objects here are structurally complete but carry no Number Registry
-values — reproducing those is `tests/test_number_registry.py`, which arrives
-at P3.
+The contract builders here are structurally complete but carry no Number
+Registry values — reproducing those is `tests/test_number_registry.py`.
+
+The `warehouse` fixture builds the whole DuckDB warehouse once per test
+session, in memory. It takes about twenty seconds, which is why it is
+session-scoped; tests that mutate it (the audit and gap-register tests)
+clear their own table first rather than asking for a fresh build.
 """
 
 from __future__ import annotations
@@ -228,3 +232,54 @@ def smoke_request() -> LLMRequest:
 @pytest.fixture
 def smoke_llm_request() -> LLMRequest:
     return smoke_request()
+
+
+# ---------------------------------------------------------------------------
+# Warehouse fixtures (P4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def layer():
+    """The loaded, cross-checked semantic layer."""
+    from semantic_layer.schema import load_semantic_layer
+
+    return load_semantic_layer()
+
+
+@pytest.fixture(scope="session")
+def warehouse(tmp_path_factory):
+    """A fully loaded warehouse, opened once for the session.
+
+    Parsing 4.5 million rows of CSV takes minutes, so the build is cached:
+    `data/casefile.duckdb` is created on first use (or by `make seed`) and
+    every later run copies it, which takes about a second.
+
+    The COPY is what the tests get. Two of them write to `audit_log` and
+    `data_gap_register`, and a test run must not leave rows behind in the
+    warehouse a developer is working against.
+    """
+    import shutil
+
+    from engine.db import DEFAULT_DB_PATH, connect
+    from engine.warehouse.load import build_warehouse
+
+    if not DEFAULT_DB_PATH.exists():
+        build_warehouse(DEFAULT_DB_PATH)
+
+    scratch = tmp_path_factory.mktemp("warehouse") / DEFAULT_DB_PATH.name
+    shutil.copyfile(DEFAULT_DB_PATH, scratch)
+
+    connection = connect(scratch)
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+@pytest.fixture(scope="session")
+def reconciliation(warehouse, layer):
+    """The four disagreements, measured against the loaded warehouse."""
+    from engine.warehouse.reconcile import reconcile
+
+    return reconcile(warehouse, layer=layer)

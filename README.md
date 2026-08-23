@@ -17,9 +17,19 @@ specifications, and the architecture. Read it before changing anything.
 ## Getting started
 
 ```bash
-make install   # or: python -m pip install -e ".[dev]"
-make test      # or: python -m pytest
+make install    # or: python -m pip install -e ".[dev]"
+make generate   # build data/raw from the synthetic data generator
+make seed       # build data/casefile.duckdb from data/raw
+make test       # or: python -m pytest
 ```
+
+`data/raw` and the warehouse are both generated and neither is committed, so a
+fresh clone needs `make generate` once before `make seed`. Re-run `generate`
+only when the generator or its config changes.
+
+`make seed` takes a few minutes and is worth running before `make test`: the
+suite builds the warehouse itself if it is missing, and every later run copies
+the built file instead of re-parsing 4.6 million rows of CSV.
 
 The full demo runs offline from recorded fixtures:
 
@@ -27,10 +37,10 @@ The full demo runs offline from recorded fixtures:
 MOCK_LLM=true make demo
 ```
 
-`make seed` builds the DuckDB warehouse from the generator. `make demo` is a
-placeholder until the demo path lands at P8.
+`make demo` is a placeholder until the demo path lands at P8.
 
 ## Status
 
-P3 complete — typed contracts, semantic layer, and the synthetic data
-generator. `tests/test_number_registry.py` is green.
+P4 complete — typed contracts, semantic layer, synthetic data generator, and
+the DuckDB warehouse with its governed query path and reconciliation report.
+`tests/test_number_registry.py` is green.
