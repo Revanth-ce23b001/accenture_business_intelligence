@@ -70,6 +70,13 @@ SELECT CAST(feed_date AS DATE), store_id, region, source_system,
        status, rows_loaded, recoverable
 FROM read_csv_auto('{raw}/pos_erp/feed_status.csv');
 
+INSERT INTO restatement_register
+SELECT restatement_id, kpi, scope, grain, period,
+       CAST(flagged_at AS DATE),
+       CAST(NULLIF(CAST(resolved_at AS VARCHAR), '') AS DATE),
+       status, reason
+FROM read_csv_auto('{raw}/pos_erp/restatements.csv');
+
 INSERT INTO fact_inventory_snapshot
 SELECT store_id, CAST(snapshot_date AS DATE), sku_id,
        snapshot_hour_ist, on_hand_units, is_ranged

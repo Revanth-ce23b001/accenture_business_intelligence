@@ -25,6 +25,15 @@ what the policy removed, which is the number that makes a filtered result
 honest: a regional manager sees 140 rows and is told 272 were withheld,
 rather than seeing 140 rows and assuming that is the estate.
 
+`execute_metadata` is the one narrow companion. Some tables describe the
+PIPELINE rather than the business — which KPI definition was live, which
+periods finance reopened, what the calendar is. They hold no measure and
+no store-level row, so a row predicate has nothing to filter, and applying
+one would mean a store manager could not be told which definition their
+own number was computed under. Those tables are named in an ALLOW-LIST in
+`semantic_layer/warehouse.yaml`, the schema refuses to let a fact table
+onto it, and every read is audited exactly like a governed one.
+
 Rule 2 applies here too: this module contains no thresholds, no table
 names and no SQL text of its own. The DDL is `warehouse/schema.sql`, the
 loads are `warehouse/load.sql`, and every policy string comes from
@@ -34,6 +43,7 @@ loads are `warehouse/load.sql`, and every policy string comes from
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 
@@ -206,6 +216,114 @@ def execute_governed(
     return GovernedResult(rows, rows_filtered, columns_masked)
 
 
+def execute_metadata(
+    user: User,
+    table: str,
+    sql: str,
+    params: Mapping[str, Any] | None = None,
+    *,
+    connection: duckdb.DuckDBPyConnection | None = None,
+    layer: SemanticLayer | None = None,
+    purpose: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Read a pipeline-metadata table. No row predicate, and an allow-list.
+
+    `table` is the metadata table being read and must appear in
+    `warehouse.yaml -> governance.metadata_tables`. It is not interpolated
+    into the statement; it is the caller declaring what it is reading so
+    the allow-list can be enforced and the audit row can say so.
+
+    Every read is audited. The audit row records the wildcard predicate, so
+    an ungoverned read is visible AS ungoverned rather than looking like a
+    policy that happened to filter nothing.
+    """
+    layer = layer or get_semantic_layer()
+    governance = layer.warehouse.governance
+
+    if table not in governance.metadata_tables:
+        raise GovernanceError(
+            f"{table!r} is not a metadata table. execute_metadata applies no row "
+            f"predicate and may only read {sorted(governance.metadata_tables)}; "
+            "everything else goes through execute_governed."
+        )
+
+    connection = connection if connection is not None else get_connection()
+    statement = to_duckdb_params(sql.strip().rstrip(";"))
+    bindings = _bindings_used(statement, dict(params or {}))
+
+    policy = AppliedPolicy(
+        kpi=table,
+        persona=user.persona,
+        row_predicate=governance.unrestricted_predicate,
+        masked_columns=(),
+        bindings={},
+    )
+    try:
+        cursor = connection.execute(statement, bindings) if bindings else connection.execute(
+            statement
+        )
+        columns = [description[0] for description in cursor.description]
+        rows = tuple(
+            {name: value for name, value in zip(columns, record, strict=True)}
+            for record in cursor.fetchall()
+        )
+    except Exception:
+        _audit(connection, user, policy, sql, rows_returned=0, rows_filtered=0, purpose=purpose)
+        raise
+
+    _audit(
+        connection,
+        user,
+        policy,
+        sql,
+        rows_returned=len(rows),
+        rows_filtered=0,
+        purpose=purpose,
+    )
+    return rows
+
+
+def as_stored_timestamp(moment: datetime) -> datetime:
+    """Normalise an aware datetime for a DuckDB TIMESTAMP column.
+
+    DuckDB's TIMESTAMP is naive. Handing it an aware datetime makes it
+    convert to the session's local time, so a UTC midnight comes back as
+    05:30 in India and every stored timestamp is silently off by the
+    machine's offset. Convert to UTC and drop the tzinfo, so what is
+    stored is what was meant, on every machine.
+    """
+    if moment.tzinfo is None:
+        return moment
+    return moment.astimezone(UTC).replace(tzinfo=None)
+
+
+def warehouse_clock(
+    connection: duckdb.DuckDBPyConnection,
+    layer: SemanticLayer | None = None,
+) -> datetime:
+    """The latest day the warehouse holds data for.
+
+    Freshness is measured against this, not against the wall clock. The
+    warehouse is a fixed 18-month extract; measuring its age against today
+    would make every source look stale for a reason that says nothing
+    about the data.
+
+    Lives here rather than in a stage module because it is a property of
+    the warehouse, and every stage that needs a "now" must agree on one.
+    """
+    layer = layer or get_semantic_layer()
+    calendar = layer.warehouse.reconciliation.calendar_mismatch
+    value = connection.execute(
+        f'SELECT MAX("{calendar.date_column}") FROM "{calendar.calendar_table}"'
+    ).fetchone()[0]
+    if value is None:
+        raise GovernanceError(
+            f"{calendar.calendar_table} is empty; the warehouse has no clock. "
+            "Run `make seed`."
+        )
+    return datetime(value.year, value.month, value.day, tzinfo=UTC)
+
+
 def to_duckdb_params(sql: str) -> str:
     """Rewrite `:name` placeholders to DuckDB's `$name`, leaving `::` casts."""
     return _NAMED_PARAM.sub(r"$\1", sql)
@@ -311,9 +429,12 @@ __all__ = [
     "IN_MEMORY",
     "GovernanceError",
     "GovernedResult",
+    "as_stored_timestamp",
     "close_connections",
     "connect",
     "execute_governed",
+    "execute_metadata",
     "get_connection",
     "to_duckdb_params",
+    "warehouse_clock",
 ]

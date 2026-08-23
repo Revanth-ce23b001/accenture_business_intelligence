@@ -1,0 +1,161 @@
+# VALIDATE — Gate 1.
+#
+# The first stage of the pipeline, and the one whose job is to stop a case
+# being opened at all. CLAUDE.md §Architecture:
+#
+#   Data -> VALIDATE -> QUALIFY -> GATHER -> ADJUDICATE -> VERDICT
+#
+# Five checks run against the movement before anything else looks at it.
+# None of them returns a boolean. Each returns a NAMED EXIT, because
+# "validation failed" tells an analyst nothing and "25 store feeds did not
+# load, so the -18% is an artefact" tells them everything. The exit code is
+# what renders on the kill chip and what `case_registry` records.
+#
+# Case #2470 is the whole reason this stage exists: a -18.0% daily movement
+# in West that is not a movement at all. It exits DATA_INCIDENT and no case
+# is opened. Case #2451 passes all five and proceeds to QUALIFY.
+#
+# CLAUDE.md rule 2: every threshold below is read from here by
+# engine/validate/, which contains no number of its own.
+
+version: 1
+
+gate_id: 1
+name: Data completeness
+# The gate's headline code when a check fails and no more specific one
+# applies. Individual checks name their own exit; this is the fallback.
+outcome_code: DATA_INCIDENT
+
+checks:
+
+  # -------------------------------------------------------------------------
+  # 1. Is every source the KPI depends on inside its refresh SLA?
+  #
+  # The SLA is the KPI contract's own (`refresh.sla_hours`), not a number
+  # here — different KPIs tolerate different lag, and the contract is where
+  # its owner declared it. Staleness is measured against the warehouse
+  # clock: the newest day the warehouse holds, not today's date. A fixed
+  # 18-month extract is not stale for being an extract.
+  # -------------------------------------------------------------------------
+  source_freshness:
+    order: 1
+    name: Source freshness against SLA
+    exit_code: DATA_INCIDENT
+    # Which sources are checked: the contract's `confidence_rules
+    # .required_sources`, or every source it declares.
+    scope: required_sources
+    sla_from: kpi_contract.refresh.sla_hours
+    # Multiplies the contract's SLA before comparing. 1.0 means the SLA is
+    # the limit. Raise it to allow a grace period without editing every
+    # KPI contract.
+    sla_multiplier: 1.0
+    # A static master (no date column in the source registry) cannot be
+    # stale. Reported as static rather than silently treated as fresh.
+    static_sources_pass: true
+
+  # -------------------------------------------------------------------------
+  # 2. Did every store's feed carry its usual number of rows?
+  #
+  # Per store, the mean rows loaded per day over the period, against the
+  # median of the same statistic over the preceding lookback. A store that
+  # loaded nothing is the signal; a quiet Tuesday is not, which is why the
+  # comparison is a median and not a mean.
+  #
+  # This is the check that catches #2470, and the reason it catches #2470
+  # at DAILY grain and not at monthly is arithmetic: a store that loses one
+  # day in thirty moves its monthly mean by three percent, and a store that
+  # loses its only day moves it by a hundred.
+  # -------------------------------------------------------------------------
+  row_count_delta:
+    order: 2
+    name: Row-count delta per store against the 8-week median
+    exit_code: DATA_INCIDENT
+    source_table: fact_feed_status
+    measure: rows_loaded
+    # The value of `status` that means the feed arrived. Anything else is
+    # reported alongside the row-count shortfall as corroboration.
+    loaded_status: LOADED
+    lookback_weeks: 8
+    statistic: median
+    # A store breaches when its period mean falls this far below its own
+    # median. Relative, so a large store and a small one are held to the
+    # same standard.
+    max_store_shortfall: 0.50
+    # The gate fails when more than this share of the scope's stores
+    # breach. One store with a broken till is an operational ticket; seven
+    # percent of the region is an incident.
+    max_affected_store_share: 0.05
+    # Below this, the lookback is too short to have a median worth
+    # comparing against, and the check reports INSUFFICIENT_BASELINE
+    # rather than passing quietly.
+    min_lookback_days: 14
+
+  # -------------------------------------------------------------------------
+  # 3. Has the KPI's definition changed since the last run?
+  #
+  # A movement computed under a new definition is not comparable with the
+  # period before it, and the difference looks exactly like a real change.
+  # The hash is of the fields that decide what the number MEANS — not of
+  # the whole file, or a comment would trigger it.
+  # -------------------------------------------------------------------------
+  definition_drift:
+    order: 3
+    name: Definition drift against the last run
+    exit_code: DEFINITION_CHANGE
+    algorithm: sha256
+    hashed_fields: [version, definition, formula_sql]
+    log_table: kpi_definition_log
+    # How much of the fingerprint to show in a one-line detail. Enough to
+    # tell two definitions apart by eye, not enough to read as the hash.
+    display_hash_chars: 12
+    # The first run of a KPI has nothing to compare against. It records the
+    # hash and passes; it does not report a change against nothing.
+    first_run_passes: true
+
+  # -------------------------------------------------------------------------
+  # 4. Is one transaction carrying the movement?
+  #
+  # CLAUDE.md's own framing: top bill divided by the movement. Above the
+  # limit, the movement is one order, not a trend, and a case would
+  # investigate a customer rather than the business.
+  #
+  # `fact_bill_lines` is a deterministic 2% sample, so the largest bill
+  # OBSERVED is a lower bound on the largest bill that exists. The check
+  # therefore under-fires rather than over-fires, and says so on its
+  # evidence: completeness carries the sample rate.
+  # -------------------------------------------------------------------------
+  single_transaction_dominance:
+    order: 4
+    name: Single-transaction dominance
+    exit_code: ONE_OFF
+    source_table: fact_bill_lines
+    transaction_key: bill_id
+    amount_expression: "SUM(gross_amount - discount_amount - tax_amount - returns_amount)"
+    max_top_transaction_share: 0.25
+    # A movement at or below this is too small for the ratio to mean
+    # anything — dividing by nearly nothing makes any bill look dominant.
+    # Movements this small are Gate 2's business, not Gate 1's.
+    min_movement_inr: 100000.0
+
+  # -------------------------------------------------------------------------
+  # 5. Has this period been flagged for restatement?
+  #
+  # A restatement is DECLARED by finance, not inferred. Late-arriving
+  # returns make a young period incomplete, and incompleteness is not a
+  # restatement — somebody has to say the published figure is wrong and
+  # will be reissued. So this reads the register, and a period nobody has
+  # flagged passes however young its data is.
+  #
+  # The KPI contract's `refresh.restatement_window_days` bounds how long a
+  # flag stays relevant after it was raised.
+  # -------------------------------------------------------------------------
+  restatement_pending:
+    order: 5
+    name: Restatement flagged within the window
+    exit_code: PENDING_RESTATEMENT
+    register_table: restatement_register
+    open_status: OPEN
+    window_from: kpi_contract.refresh.restatement_window_days
+    # A flag on a wider scope covers the narrower one: All-India covers
+    # West. A flag on West does not cover All-India.
+    scope_wildcard: All-India

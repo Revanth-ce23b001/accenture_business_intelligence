@@ -49,6 +49,8 @@ REQUIRED_TABLES = {
     # external
     "ext_competitor_news",
     "ext_weather_daily",
+    # operational registers
+    "restatement_register",
     # case artefacts
     "case_registry",
     "case_hypothesis",
@@ -61,6 +63,7 @@ REQUIRED_TABLES = {
     "telemetry_event",
     "audit_log",
     "data_gap_register",
+    "kpi_definition_log",
 }
 
 #: Loaded because P5 needs them, though the brief's table list omits them.
@@ -79,6 +82,8 @@ SUPPORTING_TABLES = {
 #:                      -> tests/test_governed_access.py
 #:   data_gap_register  engine/warehouse/reconcile.py::write_gaps
 #:                      -> tests/test_reconciliation.py
+#:   kpi_definition_log engine/validate/checks.py, on the first run of a KPI
+#:                      -> tests/test_validate.py
 #:
 #: The rest wait for a case to produce them.
 EMPTY_AFTER_LOAD = {
@@ -93,6 +98,8 @@ EMPTY_AFTER_LOAD = {
     "telemetry_event",
     "audit_log",
     "data_gap_register",
+    # Written by engine/validate when Gate 1 first runs a KPI.
+    "kpi_definition_log",
 }
 
 
@@ -161,6 +168,7 @@ RAW_TO_TABLE = [
     ("store_ops/store_notes.csv", "doc_store_notes"),
     ("store_ops/tickets.csv", "doc_tickets"),
     ("store_ops/reviews.csv", "doc_reviews"),
+    ("pos_erp/restatements.csv", "restatement_register"),
     ("context/marketing_spend.csv", "fact_marketing_spend_weekly"),
     ("context/competitor_news.csv", "ext_competitor_news"),
     ("context/weather_daily.csv", "ext_weather_daily"),

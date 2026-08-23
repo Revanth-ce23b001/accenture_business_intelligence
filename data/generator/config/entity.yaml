@@ -182,6 +182,41 @@ reconciliation:
     fiscal_year_start_day: 1
 
 # --------------------------------------------------------------------------
+# Restatement register. A restatement is DECLARED by finance, not inferred
+# from late-arriving data — which is why Gate 1's fifth check reads this
+# table rather than looking at how young the period is.
+#
+# Every seeded entry is historical and RESOLVED, and none covers a
+# scenario period (#2451 Nov-2025 West, #2467 Oct-2025 East, #2470
+# 12-Nov-2025 West, #2472 Sep-2025 South). The register exists so the
+# check has something real to read; it is not a trap.
+# --------------------------------------------------------------------------
+restatements:
+  register:
+    - restatement_id: RS0001
+      kpi: net_revenue
+      scope: North
+      grain: monthly
+      period: "2025-07"
+      flagged_at: "2025-08-05"
+      resolved_at: "2025-08-19"
+      status: RESOLVED
+      reason: >
+        Two Delhi stores double-counted a bulk institutional order across
+        the June/July boundary. Both months reissued.
+    - restatement_id: RS0002
+      kpi: conversion_rate
+      scope: South
+      grain: monthly
+      period: "2025-04"
+      flagged_at: "2025-05-11"
+      resolved_at: "2025-05-23"
+      status: RESOLVED
+      reason: >
+        Three Bengaluru door counters were double-counting entries after a
+        firmware update. Footfall restated, conversion reissued.
+
+# --------------------------------------------------------------------------
 # Public reviews. The weakest evidence lane (reliability 0.35). Volume is
 # background only — what matters is the competitor-mention count, which
 # scenario_2467.yaml pins.

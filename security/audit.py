@@ -78,10 +78,17 @@ class AuditRecord:
         )
 
     def as_row(self) -> tuple:
-        """Positional values for the `audit_log` insert."""
+        """Positional values for the `audit_log` insert.
+
+        The timestamp is normalised by the caller's storage helper rather
+        than here: how a datetime lands in a column is the warehouse's
+        business, and this module does not know what the column is.
+        """
+        from engine.db import as_stored_timestamp
+
         return (
             self.audit_id,
-            self.occurred_at,
+            as_stored_timestamp(self.occurred_at),
             self.user_id,
             self.persona,
             self.kpi,

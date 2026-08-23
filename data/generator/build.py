@@ -654,6 +654,7 @@ def write_outputs(world: World, out: Path | None = None) -> dict[str, Any]:
         sources.emit_sales_daily_sku,
         sources.emit_bill_lines,
         sources.emit_feed_status,
+        sources.emit_restatements,
         sources_ops.emit_inventory_snapshot,
         sources_ops.emit_store_notes,
         sources_ops.emit_tickets,

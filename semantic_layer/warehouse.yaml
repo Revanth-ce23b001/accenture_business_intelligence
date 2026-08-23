@@ -55,6 +55,21 @@ governance:
   # never has to know the string.
   unrestricted_predicate: "TRUE"
 
+  # Tables `execute_metadata` is allowed to read. These describe the
+  # PIPELINE, not the business: which definition was live, which periods
+  # finance reopened, what the calendar is. They hold no measure and no
+  # store-level row, so there is nothing for a row predicate to filter and
+  # applying one would mean a store manager could not be told which
+  # definition their number was computed under.
+  #
+  # The list is an allow-list precisely so that this cannot become a way
+  # to read fact_sales_daily. A test asserts no fact_/doc_/ext_ table is
+  # ever added to it.
+  metadata_tables:
+    - dim_calendar
+    - kpi_definition_log
+    - restatement_register
+
   # execute_governed evaluates the row predicate as an extra column on the
   # wrapped query, then splits kept rows from filtered ones in Python, so
   # it can report how many rows the policy removed rather than just how
@@ -62,6 +77,74 @@ governance:
   # result is returned. Leading underscores keep it out of the way of any
   # real column.
   visibility_column: "__casefile_row_visible"
+
+# ---------------------------------------------------------------------------
+# SOURCE REGISTRY.
+#
+# A KPI contract names the source systems it depends on; this says where
+# each one actually lands in the warehouse and which column carries its
+# date. Gate 1's freshness check reads it, and it is the only place the
+# mapping exists — the `tables:` list on a KPI contract is documentation of
+# the source system, written before the warehouse had a shape, and the two
+# names do not always match.
+#
+# `date_column: null` marks a static master. A master has no arrival time,
+# so it cannot be stale; the check reports it as static rather than
+# inventing a freshness of zero and calling it fresh.
+# ---------------------------------------------------------------------------
+# `scope_join` says how a row in this source is tied to the estate, which
+# is what lets the freshness query carry the column a persona's row
+# predicate binds to:
+#
+#   region    the table carries `region` itself
+#   store_id  join dim_store to get `region`
+#   none      the source is national and has no store dimension. A scoped
+#             persona cannot read it, and Gate 1 reports that as an
+#             unverifiable source rather than pretending it checked.
+sources:
+  pos:
+    table: fact_sales_daily
+    date_column: txn_date
+    scope_join: region
+    description: Point-of-sale daily net revenue, the authoritative fact.
+  returns:
+    table: fact_bill_lines
+    date_column: posted_date
+    scope_join: store_id
+    description: >
+      Returns credit against the bill's posting date, which is up to three
+      days after the sale. This feed therefore holds rows dated AFTER the
+      newest sales row, and a negative staleness is clamped to zero.
+  erp:
+    table: dim_store
+    date_column: null
+    scope_join: region
+    description: Store and organisation master. Static.
+  pricing:
+    table: dim_sku
+    date_column: null
+    scope_join: none
+    description: Product and list-price master. Static.
+  footfall:
+    table: fact_footfall_daily
+    date_column: footfall_date
+    scope_join: store_id
+    description: Door-sensor counts. Partial estate coverage.
+  wms:
+    table: fact_inventory_snapshot
+    date_column: snapshot_date
+    scope_join: store_id
+    description: Warehouse and store stock snapshots, four a day.
+  qcomm_oms:
+    table: fact_qcomm_weekly
+    date_column: week_start
+    scope_join: none
+    description: Quick-commerce order management, weekly. National, no store key.
+  store_notes:
+    table: doc_store_notes
+    date_column: note_date
+    scope_join: store_id
+    description: Free-text shift notes.
 
 # ---------------------------------------------------------------------------
 # RECONCILIATION.

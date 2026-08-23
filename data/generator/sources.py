@@ -451,13 +451,22 @@ def emit_bill_lines(world, out: Path) -> dict[str, int]:
 
 
 def emit_feed_status(world, out: Path) -> dict[str, int]:
-    """#2470: 25 West store feeds fail to load on 12 Nov 2025.
+    """Did each store's POS feed load, and how many rows did it carry.
+
+    One row per store per day for the whole window. The history is the
+    point: a feed that failed is only visible as a failure when there is a
+    normal week to compare it against, and Gate 1's row-count check reads
+    the eight-week median off this table.
+
+    #2470: 25 of 140 West store feeds fail to load on 12 Nov 2025.
 
     The FEED is broken; the sales are not. sales_daily carries the true
     figure, so #2451's monthly reconciliation is unaffected and the day is
     recoverable on reload. That is the only reading under which
     CLAUDE.md's "non-overlapping scenarios" and "a daily check inside
-    #2451's month" can both hold.
+    #2451's month" can both hold — and it is why the incident shows up at
+    daily grain and vanishes at monthly: one missing day in thirty moves a
+    store's mean by three percent.
     """
     scenario = world.scenarios["2470"]
     rng = world.streams.fresh("feed_status_2470")
@@ -469,7 +478,8 @@ def emit_feed_status(world, out: Path) -> dict[str, int]:
     n_failed = int(scenario["targets"]["failed_store_feeds"])
 
     west = stores["region"].to_numpy() == "West"
-    day_col = calendar["date"].dt.strftime("%Y-%m-%d").to_numpy() == incident_date
+    dates = calendar["date"].dt.strftime("%Y-%m-%d").to_numpy()
+    day_col = dates == incident_date
     day_revenue = world.actual[:, day_col].reshape(-1)
     west_total = day_revenue[west].sum()
 
@@ -485,24 +495,73 @@ def emit_feed_status(world, out: Path) -> dict[str, int]:
             best, best_err = pick, err
     failed = set(world.stores["store_id"].to_numpy()[best])
 
-    rows = []
-    for sid, region in zip(
-        stores["store_id"].to_numpy(), stores["region"].to_numpy(), strict=True
-    ):
-        loaded = sid not in failed
-        rows.append(
-            {
-                "feed_date": incident_date,
-                "store_id": sid,
-                "region": region,
-                "source_system": "pos_erp",
-                "status": "LOADED" if loaded else "FAILED",
-                "rows_loaded": int(rng.integers(400, 900)) if loaded else 0,
-                "recoverable": True,
-            }
-        )
-    frame = pd.DataFrame(rows).sort_values("store_id", kind="stable").reset_index(drop=True)
+    # Rows carried is bill lines, so it tracks trade rather than being
+    # drawn independently: a quiet Tuesday really does load fewer rows,
+    # and the eight-week median has to be robust to that.
+    n_stores, n_days = world.actual.shape
+    asp = _net_asp(world)
+    expected_rows = world.actual / asp
+    jitter = np.exp(rng.normal(0.0, 0.05, size=expected_rows.shape))
+    rows_loaded = np.maximum(np.round(expected_rows * jitter), 1).astype(np.int64)
+
+    store_ids = stores["store_id"].to_numpy()
+    failed_mask = np.zeros(expected_rows.shape, dtype=bool)
+    incident_col = np.where(day_col)[0][0]
+    for position, store_id in enumerate(store_ids):
+        if store_id in failed:
+            failed_mask[position, incident_col] = True
+    rows_loaded[failed_mask] = 0
+
+    frame = pd.DataFrame(
+        {
+            "feed_date": np.tile(dates, n_stores),
+            "store_id": np.repeat(store_ids, n_days),
+            "region": np.repeat(stores["region"].to_numpy(), n_days),
+            "source_system": "pos_erp",
+            "status": np.where(failed_mask.reshape(-1), "FAILED", "LOADED"),
+            "rows_loaded": rows_loaded.reshape(-1),
+            "recoverable": True,
+        }
+    )
+    frame = frame.sort_values(["feed_date", "store_id"], kind="stable").reset_index(drop=True)
+
     achieved = day_revenue[best].sum() / west_total
     world.diagnostics["incident_revenue_share"] = float(achieved)
     world.diagnostics["incident_failed_feeds"] = int(n_failed)
     return {"pos_erp/feed_status.csv": write_csv(frame, out / "pos_erp" / "feed_status.csv")}
+
+
+def emit_restatements(world, out: Path) -> dict[str, int]:
+    """Periods finance has declared open for restatement.
+
+    A restatement is DECLARED, not inferred. Returns arriving late make a
+    recent period incomplete, but incompleteness is not a restatement —
+    somebody has to say "this period's published figure is wrong and will
+    be reissued". Gate 1's fifth check reads this register, so a period
+    nobody has flagged passes it, however young the data is.
+
+    The seeded entries are historical and RESOLVED. None of them covers a
+    scenario period, so no scenario is blocked by a restatement it was
+    never meant to hit.
+    """
+    entries = world.entity["restatements"]["register"]
+    rows = [
+        {
+            "restatement_id": entry["restatement_id"],
+            "kpi": entry["kpi"],
+            "scope": entry["scope"],
+            "grain": entry["grain"],
+            "period": entry["period"],
+            "flagged_at": entry["flagged_at"],
+            "resolved_at": entry.get("resolved_at", ""),
+            "status": entry["status"],
+            "reason": entry["reason"],
+        }
+        for entry in entries
+    ]
+    frame = pd.DataFrame(rows).sort_values("restatement_id", kind="stable").reset_index(
+        drop=True
+    )
+    return {
+        "pos_erp/restatements.csv": write_csv(frame, out / "pos_erp" / "restatements.csv")
+    }

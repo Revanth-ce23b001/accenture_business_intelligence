@@ -565,8 +565,30 @@ class Governance(_Node):
     audit_table: str
     reserved_binding_prefix: str = Field(min_length=1)
     reserved_bindings: dict[str, str] = Field(min_length=1)
+    metadata_tables: list[str] = Field(min_length=1)
     unrestricted_predicate: str = Field(min_length=1)
     visibility_column: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _metadata_tables_hold_no_business_data(self) -> Governance:
+        """The allow-list must not become a way to read the facts.
+
+        `execute_metadata` applies no row predicate, so anything on this
+        list is readable by every persona. A fact, document or external
+        table on it would be a silent bypass of the whole access policy.
+        """
+        forbidden = tuple(
+            name
+            for name in self.metadata_tables
+            if name.startswith(("fact_", "doc_", "ext_"))
+        )
+        if forbidden:
+            raise ValueError(
+                f"metadata_tables contains business tables {list(forbidden)}; "
+                "execute_metadata applies no row predicate, so these would be readable "
+                "by every persona"
+            )
+        return self
 
     @model_validator(mode="after")
     def _reserved_bindings_carry_the_prefix(self) -> Governance:
@@ -710,11 +732,132 @@ class Reconciliation(_Node):
         )
 
 
+class SourceLocation(_Node):
+    """Where a KPI contract's named source system lands in the warehouse.
+
+    `date_column` is None for a static master. A master has no arrival
+    time, so it cannot be stale — Gate 1 reports it as static rather than
+    inventing a freshness of zero and calling that fresh.
+    """
+
+    table: str = Field(min_length=1)
+    date_column: str | None = None
+    scope_join: Literal["region", "store_id", "none"]
+    description: str = Field(min_length=1)
+
+    @property
+    def is_static(self) -> bool:
+        return self.date_column is None
+
+
 class WarehouseConfig(_Node):
     version: int = Field(ge=1)
     units: Units
     governance: Governance
+    sources: dict[str, SourceLocation] = Field(min_length=1)
     reconciliation: Reconciliation
+
+
+# ---------------------------------------------------------------------------
+# VALIDATE — Gate 1
+# ---------------------------------------------------------------------------
+
+#: The named exits Gate 1 can take. Not a boolean: "validation failed"
+#: tells an analyst nothing, and "25 store feeds did not load" tells them
+#: everything. Closed set — a new exit is a change to the UI and to
+#: `case_registry`, so it should not be possible to add one by typo.
+ExitCode = Literal[
+    "DATA_INCIDENT",
+    "DEFINITION_CHANGE",
+    "ONE_OFF",
+    "PENDING_RESTATEMENT",
+    "INSUFFICIENT_BASELINE",
+]
+
+#: Which of a KPI contract's sources the freshness check covers.
+FreshnessScope = Literal["required_sources", "all_sources"]
+
+
+class _CheckSpec(_Node):
+    """Common to all five checks."""
+
+    order: int = Field(ge=1, description="Evaluation and reporting priority; 1 is first")
+    name: str = Field(min_length=1)
+    exit_code: ExitCode
+
+
+class SourceFreshnessCheck(_CheckSpec):
+    scope: FreshnessScope
+    sla_from: str = Field(description="Documents which contract field supplies the limit")
+    sla_multiplier: float = Field(gt=0.0)
+    static_sources_pass: bool
+
+
+class RowCountDeltaCheck(_CheckSpec):
+    source_table: str
+    measure: str
+    loaded_status: str = Field(min_length=1)
+    lookback_weeks: int = Field(gt=0)
+    statistic: Literal["median", "mean"]
+    max_store_shortfall: float = Field(gt=0.0, le=1.0)
+    max_affected_store_share: float = Field(ge=0.0, le=1.0)
+    min_lookback_days: int = Field(gt=0)
+
+
+class DefinitionDriftCheck(_CheckSpec):
+    algorithm: Literal["sha256"]
+    hashed_fields: list[str] = Field(min_length=1)
+    log_table: str
+    display_hash_chars: int = Field(gt=0)
+    first_run_passes: bool
+
+
+class SingleTransactionCheck(_CheckSpec):
+    source_table: str
+    transaction_key: str
+    amount_expression: str = Field(min_length=1)
+    max_top_transaction_share: float = Field(gt=0.0, le=1.0)
+    min_movement_inr: float = Field(ge=0.0)
+
+
+class RestatementCheck(_CheckSpec):
+    register_table: str
+    open_status: str
+    window_from: str = Field(description="Documents which contract field supplies the window")
+    scope_wildcard: str
+
+
+class ValidateChecks(_Node):
+    """All five, named. Gate 1 runs exactly these."""
+
+    source_freshness: SourceFreshnessCheck
+    row_count_delta: RowCountDeltaCheck
+    definition_drift: DefinitionDriftCheck
+    single_transaction_dominance: SingleTransactionCheck
+    restatement_pending: RestatementCheck
+
+    def in_order(self) -> list[_CheckSpec]:
+        """The five specs, by declared priority."""
+        specs = [getattr(self, name) for name in type(self).model_fields]
+        return sorted(specs, key=lambda spec: spec.order)
+
+
+class ValidateConfig(_Node):
+    version: int = Field(ge=1)
+    gate_id: int = Field(ge=1, le=5)
+    name: str
+    outcome_code: ExitCode
+    checks: ValidateChecks
+
+    @model_validator(mode="after")
+    def _orders_are_distinct(self) -> ValidateConfig:
+        orders = [spec.order for spec in self.checks.in_order()]
+        if len(set(orders)) != len(orders):
+            raise ValueError(
+                f"two Gate 1 checks share an evaluation order ({orders}); the exit reported "
+                "first would then depend on dict iteration"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +872,9 @@ class SemanticLayer(_Node):
     recovery_curves: RecoveryCurves
     adjudication: AdjudicationConfig
     warehouse: WarehouseConfig
+    #: `validate.yaml`, named `validation` here because a field called
+    #: `validate` shadows a BaseModel method and pydantic warns about it.
+    validation: ValidateConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -797,6 +943,28 @@ class SemanticLayer(_Node):
                 raise ValueError(
                     f"confidence cap {key!r} forces unknown trigger {cap.forced_trigger!r}"
                 )
+
+        registry = self.warehouse.sources
+        for name, kpi in self.kpis.items():
+            for system in kpi.source_systems:
+                if system.name not in registry:
+                    raise ValueError(
+                        f"kpi {name!r} depends on source {system.name!r}, which has no entry "
+                        f"in warehouse.yaml -> sources ({sorted(registry)}). Gate 1's "
+                        "freshness check would have nowhere to look."
+                    )
+
+        gate_id = self.validation.gate_id
+        if gate_id not in self.adjudication.gates:
+            raise ValueError(
+                f"validate.yaml is gate {gate_id}, which adjudication.yaml does not declare"
+            )
+        declared = self.adjudication.gates[gate_id]
+        if declared.outcome_code != self.validation.outcome_code:
+            raise ValueError(
+                f"gate {gate_id} is {declared.outcome_code!r} in adjudication.yaml and "
+                f"{self.validation.outcome_code!r} in validate.yaml"
+            )
 
         conflict = self.warehouse.reconciliation.definition_conflict
         if conflict.kpi not in kpi_names:
@@ -894,6 +1062,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     curves_path = base / "recovery_curves.yaml"
     adjudication_path = base / "adjudication.yaml"
     warehouse_path = base / "warehouse.yaml"
+    validate_path = base / "validate.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -904,6 +1073,7 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
             AdjudicationConfig, _read_yaml(adjudication_path), adjudication_path
         ),
         "warehouse": _build(WarehouseConfig, _read_yaml(warehouse_path), warehouse_path),
+        "validation": _build(ValidateConfig, _read_yaml(validate_path), validate_path),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -945,9 +1115,18 @@ __all__ = [
     "RecoveryCurve",
     "RecoveryCurves",
     "RevenueDefinition",
+    "DefinitionDriftCheck",
+    "ExitCode",
+    "RestatementCheck",
+    "RowCountDeltaCheck",
     "SemanticLayer",
     "SemanticLayerError",
+    "SingleTransactionCheck",
+    "SourceFreshnessCheck",
+    "SourceLocation",
     "Units",
+    "ValidateChecks",
+    "ValidateConfig",
     "WarehouseConfig",
     "get_semantic_layer",
     "load_semantic_layer",

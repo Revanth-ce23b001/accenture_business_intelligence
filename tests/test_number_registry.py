@@ -538,16 +538,28 @@ def test_2470_is_a_daily_check(world):
 
 
 def test_25_of_140_feeds_failed(world, tmp_path):
+    """On the incident date, and only on it.
+
+    feed_status carries one row per store per day for the whole window —
+    Gate 1's row-count check needs an eight-week median to compare
+    against, and a feed that failed is only visible as a failure next to a
+    normal week. So the count is taken on 12 Nov 2025, not over the file.
+    """
     from data.generator import sources
 
     sources.emit_feed_status(world, tmp_path)
     status = pd.read_csv(tmp_path / "pos_erp" / "feed_status.csv")
-    west = status.merge(
-        world.stores[["store_id", "region"]], on="store_id", how="left"
-    )
-    west = west[west["region_y" if "region_y" in west.columns else "region"] == "West"]
+    incident = status[status["feed_date"] == world.scenarios["2470"]["period"]]
+
+    west = incident[incident["region"] == "West"]
     assert len(west) == 140
     assert int((west["status"] == "FAILED").sum()) == 25
+    assert (west[west["status"] == "FAILED"]["rows_loaded"] == 0).all()
+
+    # Every other day in the window loaded for every store.
+    other_days = status[status["feed_date"] != world.scenarios["2470"]["period"]]
+    assert int((other_days["status"] == "FAILED").sum()) == 0
+    assert len(status) == len(world.stores) * len(world.calendar)
 
 
 def test_failed_feeds_carry_18_percent_of_west_daily_revenue(world, tmp_path):

@@ -191,6 +191,47 @@ class Evidence(_Contract):
 # ---------------------------------------------------------------------------
 
 
+#: What one Gate 1 check returned. A NAMED EXIT, never a boolean:
+#: "validation failed" tells an analyst nothing, and "25 store feeds did
+#: not load, so the -18% is an artefact" tells them everything. `CLEAN` is
+#: the pass, and it is named too so that a result is always readable
+#: without knowing which way round the boolean went.
+#:
+#: The failure codes must match `ExitCode` in semantic_layer/schema.py,
+#: which is where the checks that produce them are configured.
+ValidationOutcome = Literal[
+    "CLEAN",
+    "DATA_INCIDENT",
+    "DEFINITION_CHANGE",
+    "ONE_OFF",
+    "PENDING_RESTATEMENT",
+    "INSUFFICIENT_BASELINE",
+]
+
+
+class CheckResult(_Contract):
+    """One of Gate 1's five checks, and what it found."""
+
+    check_id: str = Field(description="Key in semantic_layer/validate.yaml -> checks")
+    name: str
+    order: int = Field(ge=1, description="Evaluation and reporting priority; 1 is first")
+    outcome: ValidationOutcome
+    detail: str = Field(description="One line, naming what was found. Rendered on the chip.")
+    subjects: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "What the check is pointing at, when it points at something enumerable — "
+            "the store_ids whose feeds failed, the sources that are stale. Named, because "
+            "a count without names cannot be acted on."
+        ),
+    )
+    evidence_ids: tuple[str, ...] = Field(default=())
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome == "CLEAN"
+
+
 class GateResult(_Contract):
     """Outcome of one pipeline gate.
 
@@ -208,7 +249,31 @@ class GateResult(_Contract):
         default=None, description="Set when the gate stops the case, e.g. 'DATA_INCIDENT'"
     )
     detail: str
+    checks: tuple[CheckResult, ...] = Field(
+        default=(),
+        description=(
+            "Every check the gate ran, passing ones included. A gate that reports only "
+            "its failures cannot be used to show that the other four were clean."
+        ),
+    )
     evidence_ids: tuple[str, ...] = Field(default=())
+
+    @model_validator(mode="after")
+    def _outcome_matches_the_checks(self) -> GateResult:
+        """A gate cannot pass while one of its checks did not."""
+        if self.checks:
+            clean = all(check.passed for check in self.checks)
+            if clean != self.passed:
+                raise ValueError(
+                    f"gate {self.gate_id} reports passed={self.passed} but its checks are "
+                    f"{[check.outcome for check in self.checks]}"
+                )
+            if self.passed and self.outcome_code is not None:
+                raise ValueError(
+                    f"gate {self.gate_id} passed but still carries "
+                    f"outcome_code={self.outcome_code!r}"
+                )
+        return self
 
 
 class TestResult(_Contract):
@@ -468,6 +533,7 @@ __all__ = [
     "Adjudication",
     "AdjudicationStatus",
     "CapApplied",
+    "CheckResult",
     "ConfidenceBreakdown",
     "ConfidenceComponent",
     "Evidence",
@@ -485,6 +551,7 @@ __all__ = [
     "TestResult",
     "TestType",
     "TriggerId",
+    "ValidationOutcome",
     "Verdict",
     "VerdictValue",
 ]

@@ -159,14 +159,18 @@ CREATE TABLE IF NOT EXISTS fact_bill_lines (
     PRIMARY KEY (bill_id, line_no)
 );
 
--- Case #2470: whether each store's POS feed loaded on a given date.
+-- Whether each store's POS feed loaded, and how many rows it carried.
+-- One row per store per day for the whole window: Gate 1's row-count check
+-- reads its eight-week median off this table, and a feed that failed is
+-- only visible as a failure against a normal week. Case #2470 is 25 West
+-- stores at zero on 12 Nov 2025.
 CREATE TABLE IF NOT EXISTS fact_feed_status (
     feed_date      DATE    NOT NULL,
     store_id       VARCHAR NOT NULL,
     region         VARCHAR NOT NULL,
     source_system  VARCHAR NOT NULL,
     status         VARCHAR NOT NULL,
-    rows_loaded    INTEGER NOT NULL,
+    rows_loaded    BIGINT  NOT NULL,
     recoverable    BOOLEAN NOT NULL,
     PRIMARY KEY (feed_date, store_id, source_system)
 );
@@ -271,6 +275,23 @@ CREATE TABLE IF NOT EXISTS ext_weather_daily (
     temp_c        DOUBLE  NOT NULL,
     rain_mm       DOUBLE  NOT NULL,
     PRIMARY KEY (city, weather_date)
+);
+
+-- Periods finance has DECLARED open for restatement. Gate 1's fifth check
+-- reads this rather than inferring a restatement from how young the data
+-- is: late-arriving returns make a recent period incomplete, and
+-- incompleteness is not a restatement. Somebody has to say the published
+-- figure is wrong and will be reissued.
+CREATE TABLE IF NOT EXISTS restatement_register (
+    restatement_id  VARCHAR PRIMARY KEY,
+    kpi             VARCHAR NOT NULL,
+    scope           VARCHAR NOT NULL,
+    grain           VARCHAR NOT NULL,
+    period          VARCHAR NOT NULL,
+    flagged_at      DATE    NOT NULL,
+    resolved_at     DATE,
+    status          VARCHAR NOT NULL,
+    reason          VARCHAR NOT NULL
 );
 
 -- ===========================================================================
@@ -435,6 +456,22 @@ CREATE TABLE IF NOT EXISTS audit_log (
     rows_filtered    BIGINT  NOT NULL,
     columns_masked   VARCHAR NOT NULL,
     purpose          VARCHAR
+);
+
+-- What each KPI's definition hashed to, the last time Gate 1 ran it.
+-- A movement computed under a new definition is not comparable with the
+-- period before it, and the difference looks exactly like a real change.
+-- `first_seen_at` and `last_seen_at` bracket the window in which a hash was
+-- the live definition, so a case can be read back against the definition it
+-- was actually decided under.
+CREATE TABLE IF NOT EXISTS kpi_definition_log (
+    kpi            VARCHAR NOT NULL,
+    formula_hash   VARCHAR NOT NULL,
+    kpi_version    INTEGER NOT NULL,
+    hashed_fields  VARCHAR NOT NULL,
+    first_seen_at  TIMESTAMP NOT NULL,
+    last_seen_at   TIMESTAMP NOT NULL,
+    PRIMARY KEY (kpi, formula_hash)
 );
 
 -- Every disagreement the warehouse found and did not fix. A case that

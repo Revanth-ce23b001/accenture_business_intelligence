@@ -32,6 +32,7 @@ from typing import Any, Mapping
 import duckdb
 
 from engine.contracts import Evidence, LineageStep
+from engine.db import warehouse_clock
 from semantic_layer.schema import (
     CalendarMismatch,
     DefinitionConflict,
@@ -253,28 +254,6 @@ def write_gaps(
     rows = [gap.as_row() for gap in report.gaps]
     connection.executemany(GAP_INSERT, rows)
     return len(rows)
-
-
-def warehouse_clock(
-    connection: duckdb.DuckDBPyConnection, layer: SemanticLayer | None = None
-) -> datetime:
-    """The latest day the warehouse holds data for.
-
-    Freshness is measured against this, not against the wall clock. The
-    warehouse is a fixed 18-month extract; measuring its age against today
-    would make every source look stale for a reason that says nothing
-    about the data.
-    """
-    layer = layer or get_semantic_layer()
-    calendar = layer.warehouse.reconciliation.calendar_mismatch
-    value = connection.execute(
-        f'SELECT MAX("{calendar.date_column}") FROM "{calendar.calendar_table}"'
-    ).fetchone()[0]
-    if value is None:
-        raise ReconciliationError(
-            f"{calendar.calendar_table} is empty; load the warehouse before reconciling"
-        )
-    return datetime(value.year, value.month, value.day, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
