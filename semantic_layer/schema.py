@@ -1040,6 +1040,412 @@ class QualifyConfig(_Node):
 
 
 # ---------------------------------------------------------------------------
+# GATHER — the three lanes
+# ---------------------------------------------------------------------------
+
+
+class CausalGraphSource(_Node):
+    enabled: bool
+
+
+class CaseHistorySource(_Node):
+    enabled: bool
+    lookback_days: int = Field(gt=0)
+    bonus_per_case: float = Field(ge=0.0)
+    max_bonus: float = Field(ge=0.0)
+    closed_only: bool
+
+
+class LongTailSource(_Node):
+    enabled: bool
+    max_candidates: int = Field(ge=0)
+    prior: float = Field(gt=0.0, lt=1.0)
+    tag_prefix: str = Field(min_length=1)
+
+
+class HypothesisSources(_Node):
+    causal_graph: CausalGraphSource
+    case_history: CaseHistorySource
+    long_tail: LongTailSource
+
+
+class Applicability(_Node):
+    kpi_not_affected: float = Field(ge=0.0, le=1.0)
+    grain_supported: float = Field(ge=0.0)
+    base: float = Field(gt=0.0)
+
+
+class HypothesisScreening(_Node):
+    top_n: int = Field(gt=0)
+    sources: HypothesisSources
+    applicability: Applicability
+    #: Hypothesis -> why an earlier stage already removed it.
+    already_removed: dict[str, str] = Field(default_factory=dict)
+
+
+class StructuredTemplate(_Node):
+    """One parameterised query, and what to make of the rows it returns."""
+
+    label: str
+    source_system: str
+    unit: str
+    measure: str = Field(min_length=1)
+    aggregate: Literal["mean", "sum", "count", "min", "max"]
+    sql: str = Field(min_length=1)
+
+
+class StructuredLane(_Node):
+    measure_places: int = Field(ge=0)
+    templates: dict[str, StructuredTemplate] = Field(min_length=1)
+    #: Hypothesis -> why there is no template. Declared, because "we have
+    #: no query" and "we forgot to write one" look identical when absent.
+    unavailable: dict[str, str] = Field(default_factory=dict)
+
+
+class Corpus(_Node):
+    table: str
+    id_column: str
+    text_column: str
+    date_column: str
+    scope_join: Literal["store_id", "region", "none"]
+    reliability_kind: ReliabilityTier
+    source_system: str
+
+
+class Bm25Spec(_Node):
+    k1: float = Field(gt=0.0)
+    b: float = Field(ge=0.0, le=1.0)
+    idf_smoothing: float = Field(gt=0.0)
+
+
+class EmbeddingSpec(_Node):
+    method: Literal["tfidf_svd"]
+    components: int = Field(gt=0)
+    random_state: int
+    min_df: int = Field(ge=1)
+
+
+class RetrievalSpec(_Node):
+    method: Literal["hybrid", "bm25", "embeddings"]
+    bm25: Bm25Spec
+    embeddings: EmbeddingSpec
+    bm25_weight: float = Field(ge=0.0, le=1.0)
+    embedding_weight: float = Field(ge=0.0, le=1.0)
+    top_k_per_corpus: int = Field(gt=0)
+    min_score_range: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def _weights_form_a_blend(self) -> RetrievalSpec:
+        total = self.bm25_weight + self.embedding_weight
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"retrieval weights sum to {total!r}, not 1.0 — a blend whose weights "
+                "do not sum to one is not a blend"
+            )
+        return self
+
+
+class ClassificationSpec(_Node):
+    task: str
+    batch_size: int = Field(gt=0)
+    cache_table: str
+    prompt_version: int = Field(ge=1)
+    min_confidence: float = Field(ge=0.0, le=1.0)
+    null_tag: str = Field(min_length=1)
+
+
+class StatisticsSpec(_Node):
+    test: Literal["chi_square"]
+    yates_correction: bool
+    min_expected_cell: int = Field(ge=0)
+
+
+class UnstructuredLane(_Node):
+    corpora: dict[str, Corpus] = Field(min_length=1)
+    retrieval: RetrievalSpec
+    classification: ClassificationSpec
+    statistics: StatisticsSpec
+
+
+class ExternalFeed(_Node):
+    table: str
+    source_system: str
+    description: str
+    scope_join: Literal["store_id", "region", "none"] | None = None
+    measure: str | None = None
+    aggregate: Literal["mean", "sum", "count"] | None = None
+    unit: str | None = None
+
+
+class ExternalLane(_Node):
+    feeds: dict[str, ExternalFeed] = Field(min_length=1)
+
+
+class GatherExecution(_Node):
+    parallel_lanes: bool
+    max_workers: int = Field(gt=0)
+    fail_open: bool
+
+
+class GatherConfig(_Node):
+    version: int = Field(ge=1)
+    hypotheses: HypothesisScreening
+    structured: StructuredLane
+    unstructured: UnstructuredLane
+    external: ExternalLane
+    execution: GatherExecution
+
+
+# ---------------------------------------------------------------------------
+# ADJUDICATE — what the six tests read
+# ---------------------------------------------------------------------------
+
+
+class Series(_Node):
+    """A cause or effect series one test reads."""
+
+    label: str
+    source_system: str
+    direction: Literal["up", "down"] | None = None
+    sql: str = Field(min_length=1)
+    grain_note: str | None = None
+
+
+class ChangepointSpec(_Node):
+    method: Literal["pelt"]
+    model: Literal["rbf", "l1", "l2", "normal"]
+    penalty: float = Field(gt=0.0)
+    min_size: int = Field(gt=0)
+    jump: int = Field(gt=0)
+    min_segments: int = Field(gt=0)
+
+
+class PrecedenceSpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    changepoint: ChangepointSpec
+    #: A cause seen on the same DAY as its effect has not failed
+    #: precedence; it has been observed at daily resolution.
+    tolerance_days: int = Field(ge=0)
+    #: Whether a store-grain cause series is measured on the exposed
+    #: stores or on the whole scope.
+    measure_cause_on: Literal["exposed", "scope"]
+    effect: Series
+    causes: dict[str, Series] = Field(min_length=1)
+    window_weeks_before: int = Field(gt=0)
+    window_weeks_after: int = Field(ge=0)
+
+
+class ElasticityFallback(_Node):
+    """What Test 2 does when the history will not yield an elasticity.
+
+    Not silence. A hypothesis nobody can bound is a hypothesis nobody can
+    eliminate, and a hard gate that never fires is not a gate. The bound
+    falls back to a declared figure, the evidence records that it is
+    declared, and `elimination_margin` requires the conclusion to survive
+    the declared figure being wrong by that factor.
+    """
+
+    method: Literal["declared_upper_bound"]
+    elimination_margin: float = Field(gt=1.0)
+    source: str = Field(min_length=1)
+
+
+class ElasticitySpec(_Node):
+    method: Literal["log_log_ols"]
+    lookback_weeks: int = Field(gt=0)
+    min_observations: int = Field(gt=0)
+    min_r_squared: float = Field(ge=0.0, le=1.0)
+    fallback: ElasticityFallback | None = None
+
+
+class SufficiencySeries(_Node):
+    label: str
+    driver_unit: str
+    sql: str = Field(min_length=1)
+    declared_elasticity: float | None = Field(default=None, gt=0.0)
+    declared_source: str | None = None
+
+    @model_validator(mode="after")
+    def _a_declared_elasticity_names_its_source(self) -> SufficiencySeries:
+        if (self.declared_elasticity is None) != (self.declared_source is None):
+            raise ValueError(
+                f"{self.label!r}: a declared elasticity and the source it came "
+                "from are declared together or not at all. A number with no "
+                "provenance is the thing this project exists to refuse."
+            )
+        return self
+
+
+class SufficiencySpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    elasticity: ElasticitySpec
+    hypotheses: dict[str, SufficiencySeries] = Field(min_length=1)
+    not_testable_passes: bool
+
+
+class DoseResponseSpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    method: Literal["pearson_then_ols"]
+    min_stores: int = Field(gt=0)
+    requires_store_grain: bool
+
+
+class SpecificitySpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    method: Literal["welch_t"]
+    min_group_size: int = Field(gt=0)
+
+
+class ExposureSpec(_Node):
+    """Which stores a hypothesis's cause actually reached.
+
+    Derived per hypothesis from that hypothesis's own cause series, and
+    shared by Tests 4 and 5 so the two are answering the same question.
+    Never read off a column: which stores were affected is a CONCLUSION.
+    """
+
+    method: Literal["robust_deviation"]
+    sigma: float = Field(gt=0.0)
+    mad_scale: float = Field(gt=0.0)
+    min_group_size: int = Field(gt=0)
+
+
+class Covariate(_Node):
+    type: Literal["exact", "numeric"]
+    weight: float | None = Field(default=None, gt=0.0)
+
+    @model_validator(mode="after")
+    def _numeric_covariates_carry_a_weight(self) -> Covariate:
+        if self.type == "numeric" and self.weight is None:
+            raise ValueError("a numeric matching covariate needs a weight")
+        return self
+
+
+class MatchingSpec(_Node):
+    method: Literal["nearest_neighbour_mahalanobis"]
+    covariates: dict[str, Covariate] = Field(min_length=1)
+    ratio: int = Field(gt=0)
+    replacement: bool
+    max_distance: float = Field(gt=0.0)
+    forbidden_distance: float = Field(gt=0.0)
+
+
+class ParallelTrendsSpec(_Node):
+    name: str
+    method: Literal["ols_slope_of_log_ratio"]
+    lookback_weeks: int = Field(gt=0)
+    min_p_value: float = Field(ge=0.0, le=1.0)
+    min_points: int = Field(gt=0)
+    interpretation: str = Field(min_length=1)
+
+
+class AttributionSpec(_Node):
+    """How much of a DiD point estimate a hypothesis may claim."""
+
+    method: Literal["interval_lower_bound", "point_estimate"]
+    confidence: float = Field(gt=0.0, lt=1.0)
+
+
+class DidSpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    matching: MatchingSpec
+    pretest: ParallelTrendsSpec
+    attribution: AttributionSpec
+
+
+class ConfounderMeasure(_Node):
+    """How one confounder is screened across the treated and control groups.
+
+    Three ways, and they are different claims:
+
+      store    measured per store and balance-tested. The strongest.
+      region   identical for every store in the region, so it cannot
+               differ between two groups inside one. Resolved by
+               construction, and the reason is written down.
+      matched  removed by the matching design, naming the covariate that
+               does it. The screen checks that covariate is balanced, so
+               the claim is verified rather than asserted.
+    """
+
+    label: str
+    source_system: str
+    scope_level: Literal["store", "region", "matched"]
+    sql: str | None = None
+    note: str | None = None
+    #: For `matched`: which matching covariate removes it.
+    resolved_by: str | None = None
+
+    @model_validator(mode="after")
+    def _each_scope_level_carries_its_argument(self) -> ConfounderMeasure:
+        if self.scope_level == "store" and not self.sql:
+            raise ValueError(
+                "a store-level confounder measure needs a query; without one it cannot "
+                "be balanced between the two groups"
+            )
+        if self.scope_level == "region" and not self.note:
+            raise ValueError(
+                "a region-level confounder resolves by construction, and the reason has "
+                "to be written down"
+            )
+        if self.scope_level == "matched" and not (self.resolved_by and self.note):
+            raise ValueError(
+                "a matched confounder must name the covariate that removes it and say "
+                "why; 'the matching handles it' is not an argument"
+            )
+        return self
+
+
+class ConfounderScreenSpec(_Node):
+    test_id: int = Field(ge=1, le=6)
+    method: Literal["balance_test"]
+    min_group_size: int = Field(gt=0)
+    min_balance_p: float = Field(ge=0.0, le=1.0)
+    measures: dict[str, ConfounderMeasure] = Field(min_length=1)
+    region_level_resolves: bool
+
+
+class EliminationSpec(_Node):
+    reasons: dict[str, str] = Field(min_length=1)
+    not_testable_eliminates: bool
+
+
+class AdjudicateConfig(_Node):
+    version: int = Field(ge=1)
+    precedence: PrecedenceSpec
+    sufficiency: SufficiencySpec
+    dose_response: DoseResponseSpec
+    specificity: SpecificitySpec
+    exposure: ExposureSpec
+    did: DidSpec
+    confounder_screen: ConfounderScreenSpec
+    elimination: EliminationSpec
+
+    @model_validator(mode="after")
+    def _matched_confounders_name_a_real_covariate(self) -> AdjudicateConfig:
+        covariates = set(self.did.matching.covariates)
+        for name, measure in self.confounder_screen.measures.items():
+            if measure.scope_level != "matched":
+                continue
+            if measure.resolved_by not in covariates:
+                raise ValueError(
+                    f"confounder {name!r} claims to be resolved by "
+                    f"{measure.resolved_by!r}, which is not a matching covariate "
+                    f"({sorted(covariates)})"
+                )
+        return self
+
+    def test_ids(self) -> dict[str, int]:
+        return {
+            "precedence": self.precedence.test_id,
+            "sufficiency": self.sufficiency.test_id,
+            "dose_response": self.dose_response.test_id,
+            "specificity": self.specificity.test_id,
+            "did": self.did.test_id,
+            "confounder_screen": self.confounder_screen.test_id,
+        }
+
+
+# ---------------------------------------------------------------------------
 # The whole layer
 # ---------------------------------------------------------------------------
 
@@ -1055,6 +1461,8 @@ class SemanticLayer(_Node):
     #: `validate` shadows a BaseModel method and pydantic warns about it.
     validation: ValidateConfig
     qualify: QualifyConfig
+    gather: GatherConfig
+    adjudicate: AdjudicateConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -1174,6 +1582,66 @@ class SemanticLayer(_Node):
                     "in the stage that runs it"
                 )
 
+        # The six tests are named in two files: adjudication.yaml says what
+        # each is worth, adjudicate.yaml says what it reads. A test in one
+        # and not the other is a test nobody can run or nobody can score.
+        scored = {name: spec.test_id for name, spec in self.adjudication.tests.items()}
+        operational = self.adjudicate.test_ids()
+        if set(scored) != set(operational):
+            raise ValueError(
+                f"adjudication.yaml scores {sorted(scored)} and adjudicate.yaml reads "
+                f"{sorted(operational)}; every test needs both"
+            )
+        for name, test_id in operational.items():
+            if scored[name] != test_id:
+                raise ValueError(
+                    f"test {name!r} is {scored[name]} in adjudication.yaml and "
+                    f"{test_id} in adjudicate.yaml"
+                )
+
+        graph = self.causal_graph.hypotheses
+        for name in self.gather.structured.templates:
+            if name not in graph:
+                raise ValueError(
+                    f"structured template {name!r} is not a hypothesis in the causal graph"
+                )
+        for name in self.gather.structured.unavailable:
+            if name not in graph:
+                raise ValueError(
+                    f"gather declares {name!r} as having no template, but it is not a "
+                    "hypothesis in the causal graph"
+                )
+        for name in self.gather.hypotheses.already_removed:
+            if name not in graph:
+                raise ValueError(
+                    f"gather removes {name!r} from screening, but it is not a hypothesis "
+                    "in the causal graph"
+                )
+        for name in self.adjudicate.precedence.causes:
+            if name not in graph:
+                raise ValueError(
+                    f"adjudicate declares a cause series for {name!r}, which is not a "
+                    "hypothesis in the causal graph"
+                )
+        declared_confounders = {
+            confounder
+            for template in graph.values()
+            for confounder in template.confounders
+        }
+        missing = declared_confounders - set(self.adjudicate.confounder_screen.measures)
+        if missing:
+            raise ValueError(
+                f"the causal graph declares confounders {sorted(missing)} that Test 6 "
+                "has no way to measure; add a measure or stop declaring them"
+            )
+
+        for name, corpus in self.gather.unstructured.corpora.items():
+            if corpus.source_system not in self.causal_graph.sources:
+                raise ValueError(
+                    f"corpus {name!r} names source {corpus.source_system!r}, which the "
+                    "causal graph's source registry does not declare"
+                )
+
         conflict = self.warehouse.reconciliation.definition_conflict
         if conflict.kpi not in kpi_names:
             raise ValueError(
@@ -1272,6 +1740,8 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     warehouse_path = base / "warehouse.yaml"
     validate_path = base / "validate.yaml"
     qualify_path = base / "qualify.yaml"
+    gather_path = base / "gather.yaml"
+    adjudicate_path = base / "adjudicate.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -1284,6 +1754,10 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
         "warehouse": _build(WarehouseConfig, _read_yaml(warehouse_path), warehouse_path),
         "validation": _build(ValidateConfig, _read_yaml(validate_path), validate_path),
         "qualify": _build(QualifyConfig, _read_yaml(qualify_path), qualify_path),
+        "gather": _build(GatherConfig, _read_yaml(gather_path), gather_path),
+        "adjudicate": _build(
+            AdjudicateConfig, _read_yaml(adjudicate_path), adjudicate_path
+        ),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -1307,11 +1781,26 @@ def load_timed(root: Path | str | None = None) -> tuple[SemanticLayer, float]:
 __all__ = [
     "MANDATORY_PLAYBOOK_FIELDS",
     "AccessPolicy",
+    "AdjudicateConfig",
     "AdjudicationConfig",
+    "AttributionSpec",
+    "ConfounderMeasure",
+    "ConfounderScreenSpec",
+    "DidSpec",
+    "DoseResponseSpec",
+    "EliminationSpec",
+    "MatchingSpec",
+    "PrecedenceSpec",
+    "Series",
+    "SpecificitySpec",
+    "SufficiencySpec",
     "Baseline",
     "CalendarMismatch",
     "CausalGraph",
+    "ClassificationSpec",
+    "Corpus",
     "CostModel",
+    "GatherConfig",
     "DefinitionConflict",
     "EntityKeyMismatch",
     "EvidenceVocabulary",
@@ -1327,7 +1816,9 @@ __all__ = [
     "QualifyConfig",
     "Reconciliation",
     "RestraintSpec",
+    "RetrievalSpec",
     "SpecificityGate",
+    "StructuredTemplate",
     "Severity",
     "RecoveryCurve",
     "RecoveryCurves",

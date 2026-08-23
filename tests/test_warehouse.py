@@ -65,6 +65,7 @@ REQUIRED_TABLES = {
     "audit_log",
     "data_gap_register",
     "kpi_definition_log",
+    "llm_cache",
 }
 
 #: Loaded because P5 needs them, though the brief's table list omits them.
@@ -101,6 +102,8 @@ EMPTY_AFTER_LOAD = {
     "data_gap_register",
     # Written by engine/validate when Gate 1 first runs a KPI.
     "kpi_definition_log",
+    # Written by llm/classify.py the first time a document is tagged.
+    "llm_cache",
 }
 
 

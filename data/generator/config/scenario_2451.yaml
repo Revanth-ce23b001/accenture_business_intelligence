@@ -104,6 +104,15 @@ competing_hypotheses:
     driver: competitor_action
     complaint_increase_pct: 31
     onset_offset_days: 6
+    # Service and quality complaints in West, distinct from the size-issue
+    # tickets that corroborate H1. The rise is real and it is six days LATE
+    # — which is what Test 1 eliminates it on, and why the demo needs the
+    # series to exist rather than the number to be asserted.
+    # 140 West stores generate this many service complaints on a normal
+    # day. The level matters as much as the step: PELT locating an onset
+    # in a Poisson count series needs the step to clear the square root of
+    # the rate, and nine a day does not.
+    complaints_baseline_per_day: 45
     eliminated_on: precedence_and_confounder
 
 confidence:

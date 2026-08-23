@@ -195,8 +195,38 @@ TICKET_OTHER_BODIES = [
 TICKET_CATEGORIES = ["SIZE_ISSUE", "QUALITY", "BILLING", "OTHER", "DELIVERY"]
 
 
+#: Service and quality complaints — H5's cause series. Deliberately about
+#: nothing in particular: a complaint spike looks the same whether a
+#: competitor ran a promotion or the shelf was empty, which is exactly why
+#: Test 6 has to screen stock_out as a confounder of it.
+#: The complaint stream files honestly, under the category its text
+#: describes. That is not a contradiction of the unreliability above: the
+#: designed defect is that you cannot find a STOCK-OUT by category, and
+#: that stays true.
+COMPLAINT_CATEGORY = "QUALITY"
+
+TICKET_COMPLAINT_BODIES = [
+    "Service in the store was poor, nobody came to help.",
+    "Very disappointed with the experience today.",
+    "Store was disorganised and staff seemed uninterested.",
+    "Had a bad experience, will think twice before coming back.",
+    "Quality has gone down compared to what I expected.",
+    "Waited far too long and left without buying.",
+]
+
+
 def emit_tickets(world, out: Path) -> dict[str, int]:
-    """Event-level tickets. The category field is unreliable by design."""
+    """Event-level tickets. The category field is unreliable by design.
+
+    Two streams that matter, and keeping them apart is the point:
+
+      size-issue tickets   corroborate H1. Monthly volume is pinned by the
+                           registry (119 in October, 340 in November).
+      complaint tickets    are H5's CAUSE SERIES. They rise 31% from six
+                           days AFTER the decline began, which is what
+                           Test 1 eliminates H5 on. The rise is generated,
+                           not asserted, so PELT has something to find.
+    """
     scenario = world.scenarios["2451"]
     rng = world.streams.fresh("tickets")
     calendar = world.calendar
@@ -215,10 +245,16 @@ def emit_tickets(world, out: Path) -> dict[str, int]:
     rows: list[dict] = []
     seq = 0
 
-    def add(day, sid, body, is_size: bool) -> None:
+    def add(day, sid, body, is_size: bool, category: str | None = None) -> None:
         nonlocal seq
         seq += 1
-        if is_size:
+        if category is not None:
+            pass
+        elif is_size:
+            # THE DESIGNED UNRELIABILITY. Roughly a quarter of genuine
+            # stock-out tickets are filed under something else, which is
+            # why nobody can find this fault by filtering on category and
+            # why the text lane exists at all.
             category = (
                 "SIZE_ISSUE" if rng.random() > 0.28 else str(rng.choice(TICKET_CATEGORIES))
             )
@@ -239,10 +275,42 @@ def emit_tickets(world, out: Path) -> dict[str, int]:
         for _ in range(int(rng.poisson(6))):
             add(day, rng.choice(all_ids), str(rng.choice(TICKET_OTHER_BODIES)), False)
 
+    # H5: complaints in West, stepping up six days after the fault began.
+    h5 = scenario["competing_hypotheses"]["H5_complaints"]
+    complaint_onset = np.datetime64(scenario["mechanism"]["onset_date"]) + np.timedelta64(
+        int(h5["onset_offset_days"]), "D"
+    )
+    complaint_base = float(h5["complaints_baseline_per_day"])
+    complaint_lift = 1.0 + float(h5["complaint_increase_pct"]) / 100.0
+    for day in dates:
+        rate = complaint_base * (complaint_lift if day >= complaint_onset else 1.0)
+        for _ in range(int(rng.poisson(rate))):
+            add(
+                day,
+                rng.choice(west_ids),
+                str(rng.choice(TICKET_COMPLAINT_BODIES)),
+                False,
+                category=COMPLAINT_CATEGORY,
+            )
+
+    # Size-issue tickets are CAUSED by the empty shelf, so they follow the
+    # daily availability gap rather than being sprinkled evenly over the
+    # month. Spread uniformly they step on the 1st of November — six days
+    # before the fault started — and every changepoint search in the
+    # engine finds that calendar artefact instead of the fault.
+    gap_by_day = world.mechanism.demand_weighted_gap[world.mechanism.treated_mask].sum(axis=0)
     for month, count in (("2025-10", baseline), ("2025-11", target)):
-        month_dates = dates[period == month]
+        in_month = period == month
+        month_dates = dates[in_month]
+        weights = gap_by_day[in_month].astype(float)
+        # October has no fault, so nothing to follow: uniform is right there.
+        weights = (
+            np.full(len(month_dates), 1.0 / len(month_dates))
+            if weights.sum() <= 0
+            else weights / weights.sum()
+        )
         for _ in range(count):
-            day = month_dates[int(rng.integers(0, len(month_dates)))]
+            day = month_dates[int(rng.choice(len(month_dates), p=weights))]
             sid = rng.choice(treated_ids) if rng.random() < 0.78 else rng.choice(west_ids)
             add(day, sid, str(rng.choice(TICKET_SIZE_BODIES)), True)
 

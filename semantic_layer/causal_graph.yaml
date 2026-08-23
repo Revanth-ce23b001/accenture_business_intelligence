@@ -72,7 +72,12 @@ hypotheses:
     required_sources: [wms, erp]
     available_sources: [wms, erp, store_notes, support_tickets]
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
-    confounders: [assortment_change, transport_disruption, promo_lapse]
+    # CLAUDE.md §Confidence specification names these four by hand: "Test 6
+    # screened promo, weather, competitor openings and staffing across the
+    # treated and control groups and found no difference". P2 guessed a
+    # different set before that sentence had been reconciled; this is the
+    # sentence.
+    confounders: [promo_lapse, weather, competitor_action, staffing_shortfall]
     prior: 0.18
 
   price_increase:
@@ -119,7 +124,12 @@ hypotheses:
     required_sources: [competitor_pricing, competitor_footfall]
     available_sources: [competitor_news]
     applicable_tests: [precedence, dose_response, specificity, confounder_screen]
-    confounders: [calendar_shift, weather, footfall_decline, promo_lapse]
+    # stock_out belongs here and it is the one that decides case #2451's
+    # H5. An empty shelf produces exactly the complaint spike a competitor
+    # promotion would produce — "size not available", "went elsewhere" —
+    # so a complaint series alone cannot tell them apart. Test 6 finds it
+    # unresolved, and H5 is confounded as well as late.
+    confounders: [calendar_shift, weather, footfall_decline, promo_lapse, stock_out]
     prior: 0.10
     calibration_note: "58% accurate on n=12 closed cases — below publication floor"
 

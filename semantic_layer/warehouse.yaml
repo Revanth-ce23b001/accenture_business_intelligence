@@ -163,6 +163,50 @@ sources:
     grain: daily
     scope_join: store_id
     description: Free-text shift notes.
+  support_tickets:
+    table: doc_tickets
+    date_column: created_date
+    grain: daily
+    scope_join: store_id
+    description: >
+      Customer support tickets. The `category` field is filled in by
+      whoever took the call and is wrong about a quarter of the time; the
+      body is the truth.
+  review_feed:
+    table: doc_reviews
+    date_column: review_date
+    grain: daily
+    scope_join: store_id
+    description: >
+      Public reviews. The weakest tier there is — no verified-purchase
+      flag, no competitor price. It can corroborate and never test.
+  competitor_news:
+    table: ext_competitor_news
+    date_column: published_date
+    grain: daily
+    scope_join: none
+    description: >
+      External news mentions. No price column and no footfall column,
+      because the organisation holds neither — which is what makes
+      competitor_action unverifiable rather than merely unproven.
+  weather_feed:
+    table: ext_weather_daily
+    date_column: weather_date
+    grain: daily
+    scope_join: region
+    description: Daily rainfall and temperature by city.
+  marketing_spend:
+    table: fact_marketing_spend_weekly
+    date_column: week_start
+    grain: weekly
+    scope_join: region
+    description: Media and trade spend by region and ISO week.
+  promo_calendar:
+    table: dim_calendar
+    date_column: date
+    grain: daily
+    scope_join: none
+    description: Scheduled promotional windows, carried on the calendar.
 
 # ---------------------------------------------------------------------------
 # EVIDENCE.
@@ -203,6 +247,14 @@ evidence:
     compare: A comparison against a threshold, a band or a peer.
     hash: A content fingerprint.
     lookup: Read straight off a contract or a register.
+    # ADJUDICATE's five. Each names a published method, not a description
+    # of one: a reader who does not trust the number can look the method
+    # up and re-run it.
+    changepoint: PELT changepoint detection on a series.
+    elasticity: A log-log elasticity fitted by least squares.
+    welch_t: Welch's unequal-variance t-test between two groups.
+    did: Difference-in-differences against a matched control group.
+    balance: A covariate balance test between treated and control.
 
 # ---------------------------------------------------------------------------
 # RECONCILIATION.

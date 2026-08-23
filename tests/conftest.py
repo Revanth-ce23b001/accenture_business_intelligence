@@ -11,9 +11,15 @@ clear their own table first rather than asking for a fresh build.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 
 import pytest
+
+# CLAUDE.md rule 8: the full demo runs offline from recorded fixtures, and
+# so does the suite. Set before anything imports `llm.provider`, so a test
+# that forgets to pass a provider gets the mock rather than a socket.
+os.environ.setdefault("MOCK_LLM", "true")
 
 from engine.contracts import (
     Adjudication,

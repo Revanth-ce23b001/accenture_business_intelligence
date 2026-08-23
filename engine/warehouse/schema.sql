@@ -519,6 +519,25 @@ CREATE TABLE IF NOT EXISTS kpi_definition_log (
     PRIMARY KEY (kpi, formula_hash)
 );
 
+-- Model responses, keyed by a hash of the DOCUMENT rather than the batch.
+--
+-- The corpora repeat heavily — "Routine day, footfall normal, no issues to
+-- report" is one document however many stores filed it — so hashing the
+-- document is what makes the cache worth having. Batching is how the calls
+-- are made efficient; hashing is how most of them stop being made at all.
+--
+-- The key covers everything that could change the answer: the text, the
+-- candidate tag set, the prompt version and the model. Change any of them
+-- and the old answer is correctly a miss.
+CREATE TABLE IF NOT EXISTS llm_cache (
+    content_hash    VARCHAR PRIMARY KEY,
+    task            VARCHAR NOT NULL,
+    model           VARCHAR NOT NULL,
+    prompt_version  INTEGER NOT NULL,
+    response_json   VARCHAR NOT NULL,
+    created_at      TIMESTAMP NOT NULL
+);
+
 -- Every disagreement the warehouse found and did not fix. A case that
 -- touches an affected scope cites the row rather than working around it.
 CREATE TABLE IF NOT EXISTS data_gap_register (

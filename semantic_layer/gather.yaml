@@ -1,0 +1,322 @@
+# GATHER — three lanes, run before anything is adjudicated.
+#
+# QUALIFY produced a residual worth explaining. GATHER goes and finds the
+# evidence, for every candidate hypothesis at once, and then stops. It
+# forms no opinion: adjudication is the next stage and it gets the
+# evidence cold.
+#
+#   structured    parameterised queries, one template per hypothesis type,
+#                 every one through engine/db.py::execute_governed
+#   unstructured  BM25 plus in-memory embeddings over the three document
+#                 corpora, then a batched Haiku pass that assigns a TAG
+#   external      the calendar, the weather and the competitor news feed
+#
+# THE CLASSIFIER NEVER PRODUCES A NUMBER. It assigns a tag, extracts an
+# event date, and reports how sure it is about its own tagging. Counting
+# those tags, turning counts into rates, and testing whether the
+# difference between two groups could have happened by chance are all
+# Python. CLAUDE.md rule 1 is not a style preference here — it is the
+# reason the chi-square in case #2451 means anything.
+#
+# CLAUDE.md rule 2: every threshold below is read from here by
+# engine/gather/, which contains no number of its own.
+
+version: 1
+
+# ===========================================================================
+# WHERE HYPOTHESES COME FROM
+# ===========================================================================
+#
+# Three sources, screened to a working set. More than five candidates and
+# the six tests stop being affordable; fewer and the answer is whatever
+# the first plausible story was.
+hypotheses:
+  top_n: 5
+
+  sources:
+    # 1. The causal graph. Every template whose `affects` includes the KPI
+    #    under investigation, at its declared prior.
+    causal_graph:
+      enabled: true
+
+    # 2. What has moved this KPI in this region before. A driver that
+    #    explained a movement here twice is a better bet than one that
+    #    never has, and the case registry already knows.
+    case_history:
+      enabled: true
+      lookback_days: 365
+      # Added to applicability per prior closed case, up to the maximum.
+      bonus_per_case: 0.15
+      max_bonus: 0.60
+      # Only cases that reached a verdict count. An open case is a
+      # question, not a precedent.
+      closed_only: true
+
+    # 3. The long tail. The graph covers what the business has thought of;
+    #    the model is asked for what it has not. Long-tail candidates enter
+    #    at a low prior and have to earn their place — for a well-covered
+    #    KPI they will not make the cut, and that is the correct outcome.
+    long_tail:
+      enabled: true
+      max_candidates: 4
+      prior: 0.05
+      # Its own tag namespace, so a generated hypothesis can never be
+      # mistaken for one the business declared.
+      tag_prefix: "lt_"
+
+  # Applicability multiplies the prior. Note what is NOT here: a penalty
+  # for missing sources. A hypothesis the organisation cannot test is not
+  # thereby less likely to be true — it is less likely to be PROVEN, which
+  # is trigger T3's business and comes later. Penalising it here would
+  # quietly drop case #2451's H2, which is the hypothesis that holds
+  # INR 0.86 Cr and forces PARTIALLY EXPLAINED.
+  applicability:
+    kpi_not_affected: 0.0
+    grain_supported: 1.0
+    base: 1.0
+
+  # Hypotheses an earlier stage has already removed from the residual.
+  # Offering them as explanations for what is left is offering to explain
+  # the same thing twice: the residual is calendar-free by construction
+  # because Gate 2 subtracted the calendar, and it is incident-free
+  # because Gate 1 would have killed the case.
+  already_removed:
+    calendar_shift: Gate 2 decomposed the calendar out of this residual.
+    data_incident: Gate 1 cleared the feeds before the case opened.
+
+# ===========================================================================
+# LANE 1 — STRUCTURED
+# ===========================================================================
+#
+# One parameterised template per hypothesis type. Every one runs through
+# execute_governed, so a persona who cannot see a scope cannot gather
+# evidence about it either.
+#
+# `$period_start`, `$period_end`, `$comparison_start`, `$comparison_end`
+# and `$scope` are bound by the lane. Nothing else is interpolated.
+structured:
+  measure_places: 4
+
+  templates:
+
+    stock_out:
+      label: Top-20 on-shelf availability
+      source_system: wms
+      unit: pct
+      measure: availability_pct
+      aggregate: mean
+      # The 12:00 snapshot is the one the availability KPI uses. Choosing
+      # a different hour genuinely changes the answer, which is why the
+      # hour is named here rather than left to whoever writes the query.
+      sql: |
+        SELECT
+            d.region,
+            i.store_id,
+            100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+                  / COUNT(*)                                    AS availability_pct
+        FROM fact_inventory_snapshot AS i
+        JOIN dim_store AS d USING (store_id)
+        JOIN dim_sku   AS s USING (sku_id)
+        WHERE s.is_top20
+          AND i.snapshot_hour_ist = 12
+          AND i.snapshot_date BETWEEN $period_start AND $period_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+
+    price_increase:
+      label: Average selling price on the affected assortment
+      source_system: pos
+      unit: INR
+      measure: asp_inr
+      aggregate: mean
+      sql: |
+        SELECT
+            d.region,
+            k.store_id,
+            SUM(k.net_revenue_inr) / NULLIF(SUM(k.units), 0) AS asp_inr
+        FROM fact_sales_daily_sku AS k
+        JOIN dim_store AS d USING (store_id)
+        WHERE k.txn_date BETWEEN $period_start AND $period_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+
+    promo_lapse:
+      label: Marketing spend by week
+      source_system: pos
+      unit: INR
+      measure: spend_inr
+      aggregate: sum
+      # No store_id: marketing is booked by region. A store manager
+      # therefore cannot gather this, and the lane says so rather than
+      # returning an empty result that reads like an absence of spend.
+      sql: |
+        SELECT
+            region,
+            iso_year,
+            iso_week,
+            SUM(spend_inr) AS spend_inr
+        FROM fact_marketing_spend_weekly
+        WHERE week_start BETWEEN $comparison_start AND $period_end
+          AND region = $scope
+        GROUP BY 1, 2, 3
+
+    footfall_decline:
+      label: Counted footfall, instrumented stores only
+      source_system: footfall
+      unit: count
+      measure: footfall
+      aggregate: sum
+      sql: |
+        SELECT
+            d.region,
+            f.store_id,
+            SUM(f.footfall) AS footfall
+        FROM fact_footfall_daily AS f
+        JOIN dim_store AS d USING (store_id)
+        WHERE f.counter_installed
+          AND f.footfall_date BETWEEN $period_start AND $period_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+
+  # Hypotheses with no structured template, and why. Declared rather than
+  # left absent: "we have no query for this" and "we forgot to write one"
+  # look identical in an empty result.
+  unavailable:
+    competitor_action: >
+      The two sources that would test this — competitor pricing and
+      competitor catchment footfall — are not held. Any structured query
+      here would be a number manufactured from absent data.
+    weather: >
+      Weather is an external feed, gathered by lane 3. It has no
+      warehouse fact table of its own.
+
+# ===========================================================================
+# LANE 2 — UNSTRUCTURED
+# ===========================================================================
+unstructured:
+
+  corpora:
+    store_notes:
+      table: doc_store_notes
+      id_column: note_id
+      text_column: body
+      date_column: note_date
+      scope_join: store_id
+      reliability_kind: store_note
+      source_system: store_notes
+    tickets:
+      table: doc_tickets
+      id_column: ticket_id
+      text_column: body
+      date_column: created_date
+      scope_join: store_id
+      reliability_kind: ticket_aggregate
+      source_system: support_tickets
+    reviews:
+      table: doc_reviews
+      id_column: review_id
+      text_column: body
+      date_column: review_date
+      scope_join: store_id
+      reliability_kind: social_mention
+      source_system: review_feed
+
+  # Retrieval ranks the in-scope documents. It does not select which ones
+  # are classified: every in-scope document is classified, or a store
+  # whose note the ranker happened to miss would silently count as a store
+  # that filed nothing. Ranking decides what is SHOWN, not what is COUNTED.
+  retrieval:
+    method: hybrid
+    bm25:
+      k1: 1.5
+      b: 0.75
+      # The Robertson/Sparck Jones smoothing term in the idf. Part of the
+      # formula rather than a tuning knob, but rule 2 admits no numbers in
+      # engine/ at all, so it lives here with the rest of the formula.
+      idf_smoothing: 0.5
+    embeddings:
+      # TF-IDF reduced by truncated SVD. In memory, deterministic under a
+      # fixed seed, no vector database (CLAUDE.md §Stack, "explicitly not
+      # used"). ~2,000 documents does not need one and pretending it does
+      # would be dishonest.
+      method: tfidf_svd
+      components: 64
+      random_state: 20260822
+      min_df: 1
+    # Hybrid score = bm25_weight * normalised BM25 + embedding_weight * cosine.
+    bm25_weight: 0.6
+    embedding_weight: 0.4
+    top_k_per_corpus: 12
+    # Below this spread, a score set is flat and min-max normalising it
+    # would amplify floating-point noise into a ranking. Flat scores rank
+    # as zero, which is the honest answer: nothing distinguishes them.
+    min_score_range: 1.0e-12
+
+  classification:
+    task: classify
+    # Batched for the call, cached per DOCUMENT. The corpora repeat
+    # heavily — a shift note saying "routine day, no issues" is the same
+    # document however many stores filed it — so hashing the document
+    # rather than the batch is what makes the cache worth having.
+    batch_size: 25
+    cache_table: llm_cache
+    prompt_version: 1
+    # A tag below this confidence is recorded and NOT counted. The
+    # threshold is here so that changing how sure the classifier has to be
+    # is a config change with a diff, not a code change.
+    min_confidence: 0.55
+    # The tag for "none of the candidates". Always offered: a classifier
+    # that must choose will choose.
+    null_tag: none
+
+  # Counting, rates and significance. All Python; the classifier's output
+  # is the input, never the answer.
+  statistics:
+    test: chi_square
+    # Yates' correction on a 2x2 table of small counts. 21-of-34 against
+    # 2-of-34 is small enough for it to matter.
+    yates_correction: true
+    min_expected_cell: 5
+
+# ===========================================================================
+# LANE 3 — EXTERNAL
+# ===========================================================================
+external:
+  feeds:
+    calendar:
+      table: dim_calendar
+      source_system: warehouse
+      description: Festival windows and promotional windows over the period.
+    weather:
+      table: ext_weather_daily
+      source_system: weather_feed
+      scope_join: region
+      measure: rain_mm
+      aggregate: mean
+      unit: mm
+      description: Daily rainfall and temperature by city.
+    competitor_news:
+      table: ext_competitor_news
+      source_system: competitor_news
+      scope_join: none
+      unit: count
+      description: >
+        External news mentions. Carries no price and no footfall, because
+        the organisation holds neither — which is what makes
+        competitor_action structurally unverifiable rather than merely
+        unproven.
+
+# ===========================================================================
+# EXECUTION
+# ===========================================================================
+execution:
+  # The three lanes are independent and are run concurrently. The
+  # warehouse is not: one DuckDB connection is one transaction, so
+  # warehouse reads are serialised behind a lock while the ranking,
+  # embedding and classification work overlaps.
+  parallel_lanes: true
+  max_workers: 3
+  # A lane that fails does not fail the stage. GATHER's job is to bring
+  # back what it can and say what it could not — an adjudication that
+  # knows one lane is missing is worth more than one that never ran.
+  fail_open: true

@@ -1,0 +1,644 @@
+# ADJUDICATE — what the six tests READ.
+#
+# `adjudication.yaml` holds what each test is WORTH: its weight, its
+# thresholds, the confidence caps, the verdict table. This file holds what
+# each one reads — the cause series, the effect series, the matching
+# covariates, the elasticity a sufficiency bound is computed from. The two
+# are cross-checked at load: a test named here and not there, or the other
+# way round, fails the semantic layer.
+#
+# NO MODEL CALL TOUCHES THIS STAGE. GATHER already asked the model what a
+# document was about; ADJUDICATE asks whether the evidence supports the
+# hypothesis, and that is arithmetic. A static test asserts nothing under
+# engine/adjudicate/ imports llm/.
+#
+# THE TWO HARD GATES ARE THE PRODUCT. H4 (the marketing cut) has the
+# strongest correlation with the decline in the whole data set and is
+# eliminated by Test 1 alone, because the cut lands after the decline
+# started. H3 is eliminated by Test 2, because the price rise it rests on
+# cannot produce a movement that size however real it is. An LLM asked
+# "why did revenue fall?" on this data picks one of them.
+
+version: 1
+
+# ===========================================================================
+# TEST 1 — Temporal precedence. HARD GATE.
+# ===========================================================================
+precedence:
+  test_id: 1
+
+  changepoint:
+    method: pelt
+    # `l2` — a shift in MEAN. `rbf` was tried first, on the argument that a
+    # five-day ramp is a change in distribution before it is a change in
+    # mean. It behaves badly on the count series this engine has to
+    # handle: on West's daily complaint counts it finds a changepoint at
+    # penalty 4 and none at all at penalty 8, so the answer depends on a
+    # setting nobody can defend. `l2` returns the same date across every
+    # penalty from 4 to 16 on all four series here.
+    model: l2
+    # Penalty for admitting another changepoint. Higher finds fewer.
+    penalty: 8.0
+    # No changepoint inside the first or last few days: a boundary effect
+    # is not an onset.
+    min_size: 5
+    jump: 1
+    # A series has to be long enough to hold at least this many segments
+    # before it is worth searching for a break in it.
+    min_segments: 2
+
+  # A cause observed on the same DAY as its effect has not failed
+  # precedence — it has been observed at daily resolution. #2451's
+  # mechanism is instantaneous: availability falls and the basket is lost
+  # in the same shopping trip. A strict `<` would eliminate the true
+  # hypothesis and keep the false ones, which is the wrong way round.
+  #
+  # ONE day, not zero. A changepoint located on a daily series carries
+  # about a day of uncertainty either way, and at zero a one-day wobble in
+  # the estimate eliminates the true hypothesis. The competing hypotheses
+  # this has to separate are three and ten days late; a day of slack does
+  # not save either of them.
+  tolerance_days: 1
+
+  # A store-grain cause series is measured on the EXPOSED stores — the
+  # ones the same robust-deviation rule hands to Tests 4 and 5 — not on
+  # the whole estate. Averaging a fault across 140 stores when it reached
+  # 34 of them dilutes the step by a factor of four and moves the onset
+  # later. Exposure is derived from the data, so this is not the scenario
+  # flag by another name.
+  measure_cause_on: exposed
+  #
+  # Where each hypothesis's cause series comes from. The EFFECT series is
+  # the same for every hypothesis — the scope's daily residual against its
+  # calendar expectation — because they are all competing to explain the
+  # same movement.
+  effect:
+    label: Daily residual against calendar expectation
+    source_system: pos
+    direction: down
+    sql: |
+      SELECT
+          region,
+          store_id,
+          txn_date                                     AS point,
+          SUM(net_revenue_inr - calendar_expected_inr) AS value
+      FROM fact_sales_daily
+      WHERE txn_date BETWEEN $window_start AND $window_end
+        AND region = $scope
+      GROUP BY 1, 2, 3
+
+  causes:
+
+    stock_out:
+      label: Top-20 on-shelf availability
+      source_system: wms
+      direction: down
+      # EVERY store in scope, not the affected ones. Which stores were
+      # affected is a CONCLUSION of Tests 3, 4 and 5, and a series that
+      # pre-selects them has assumed the answer. The engine holds no
+      # scenario flag and reads none.
+      sql: |
+        SELECT
+            d.region,
+            i.store_id,
+            i.snapshot_date AS point,
+            100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+                  / COUNT(*) AS value
+        FROM fact_inventory_snapshot AS i
+        JOIN dim_store AS d USING (store_id)
+        JOIN dim_sku   AS s USING (sku_id)
+        WHERE s.is_top20
+          AND i.snapshot_hour_ist = 12
+          AND i.snapshot_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2, 3
+
+    promo_lapse:
+      label: Marketing spend, allocated to days
+      source_system: marketing_spend
+      direction: down
+      # Booked WEEKLY. A cut inside a week is only observable from the week
+      # that starts after it, so the onset this test can report is the
+      # first day of that week — never the day the cut actually happened.
+      # That is P4's grain mismatch showing up where it matters, and the
+      # evidence says so rather than implying a precision the feed has not
+      # got.
+      grain_note: >
+        Marketing spend is booked by ISO week. The onset reported here is
+        the first day of the first cut week, which can be up to six days
+        after the cut itself.
+      sql: |
+        SELECT
+            region,
+            spend_date AS point,
+            SUM(allocated_spend_inr) AS value
+        FROM v_marketing_spend_daily
+        WHERE spend_date BETWEEN $window_start AND $window_end
+          AND region = $scope
+        GROUP BY 1, 2
+
+    competitor_action:
+      label: Service and quality complaints
+      source_system: support_tickets
+      direction: up
+      # A complaint spike is what a competitor promotion would produce.
+      # It is also what an empty shelf produces, which is why Test 6
+      # screens stock_out against this hypothesis.
+      # Service and quality complaints only. Filtering the OTHER streams
+      # out by text was tried and abandoned: it let half the stock-out
+      # tickets through on a capital letter, and the changepoint search
+      # then found H1's fault inside H5's series. The category field is
+      # unreliable for stock-outs by design — that is P4's point — and a
+      # complaint spike is corroborated independently by GATHER's
+      # classifier over the same corpus.
+      #
+      # REGION grain, deliberately. Per store this is a third of a ticket a
+      # day, which is too sparse to carry an exposure split or a store-level
+      # changepoint — it was tried and it found two stores and no onset.
+      # The cost is real and it is recorded rather than worked around: with
+      # no store dimension this hypothesis gets no matched control group,
+      # so Test 6 cannot screen the stock-out that would produce the same
+      # spike, and reports it UNRESOLVED rather than absent.
+      sql: |
+        SELECT
+            d.region,
+            t.created_date AS point,
+            COUNT(*)       AS value
+        FROM doc_tickets AS t
+        JOIN dim_store AS d USING (store_id)
+        WHERE t.created_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+          AND t.category = 'QUALITY'
+        GROUP BY 1, 2
+
+    price_increase:
+      label: Average selling price
+      source_system: pos
+      direction: up
+      sql: |
+        SELECT
+            d.region,
+            k.store_id,
+            k.txn_date AS point,
+            SUM(k.net_revenue_inr) / NULLIF(SUM(k.units), 0) AS value
+        FROM fact_sales_daily_sku AS k
+        JOIN dim_store AS d USING (store_id)
+        WHERE k.txn_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2, 3
+
+    footfall_decline:
+      label: Counted footfall, instrumented stores
+      source_system: footfall
+      direction: down
+      sql: |
+        SELECT
+            d.region,
+            f.store_id,
+            f.footfall_date AS point,
+            SUM(f.footfall)  AS value
+        FROM fact_footfall_daily AS f
+        JOIN dim_store AS d USING (store_id)
+        WHERE f.counter_installed
+          AND f.footfall_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2, 3
+
+  # How much history either side of the period the changepoint search sees.
+  window_weeks_before: 8
+  window_weeks_after: 0
+
+# ===========================================================================
+# TEST 2 — Effect-size sufficiency. HARD GATE.
+# ===========================================================================
+#
+#   modelled_max_impact = affected_volume_share x cause_magnitude x elasticity
+#
+# and the hypothesis has to be able to produce at least
+# `min_residual_share` of the residual. This is the test that eliminates a
+# hypothesis which is TRUE and too small — H3's price rise really did
+# happen, on 8% of volume, and cannot move the number by 4.9 points
+# however real it is.
+sufficiency:
+  test_id: 2
+
+  # Elasticities are OBSERVED, not assumed: each is fitted from this
+  # warehouse's own history and the fit is reported beside the bound. A
+  # sufficiency test run on a textbook elasticity is a test of the
+  # textbook.
+  elasticity:
+    method: log_log_ols
+    lookback_weeks: 52
+    min_observations: 180
+    # An elasticity whose fit is this weak is not used as a fitted
+    # elasticity. What happens next is the `fallback` below, not silence.
+    min_r_squared: 0.05
+
+    # WHEN THE HISTORY WILL NOT YIELD AN ELASTICITY.
+    #
+    # This warehouse has no clean price experiment in it: prices move with
+    # mix, never against a demand curve, and every specification tried
+    # explains under 4% of variance. Reporting NOT TESTABLE there would be
+    # correct and useless — a hypothesis nobody can bound is a hypothesis
+    # nobody can eliminate, and the case stalls on a hard gate that never
+    # fires.
+    #
+    # So the bound falls back to the elasticity the business publishes,
+    # and the test SAYS SO. Two rules keep that honest:
+    #
+    #   1. The declared figure is an UPPER bound, chosen generously. The
+    #      hypothesis is given the most favourable elasticity anyone
+    #      claims for the category and asked whether it can still reach
+    #      the residual.
+    #   2. Elimination on a declared elasticity requires the bound to miss
+    #      by `elimination_margin`. The conclusion has to survive the
+    #      assumption being wrong by that factor, or it is not drawn.
+    #
+    # The evidence records `fitted: false` and names the source. Nobody
+    # reading the case can mistake this for a measurement.
+    fallback:
+      method: declared_upper_bound
+      elimination_margin: 3.0
+      source: semantic_layer/adjudicate.yaml::sufficiency.elasticity.fallback
+
+  hypotheses:
+    price_increase:
+      label: Price elasticity of volume
+      driver_unit: pct
+      # Merchandising's published own-price elasticity for footwear. Used
+      # only when the fit fails, and generous on purpose: real category
+      # estimates cluster nearer 0.8, and the argument is stronger for
+      # giving the hypothesis the larger number.
+      declared_elasticity: 1.2
+      declared_source: Merchandising category price elasticity, footwear, FY25 review
+      # Volume against price, both in logs, at store x week.
+      sql: |
+        SELECT
+            d.region,
+            k.store_id,
+            SUM(k.units)                                     AS volume,
+            SUM(k.net_revenue_inr) / NULLIF(SUM(k.units), 0) AS price
+        FROM fact_sales_daily_sku AS k
+        JOIN dim_store AS d USING (store_id)
+        WHERE k.txn_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2, k.txn_date
+
+    stock_out:
+      label: Availability elasticity of revenue
+      driver_unit: pt
+      # Basket abandonment puts this above 1: a shopper who came for an
+      # out-of-stock hero SKU sometimes leaves without the available items
+      # in the basket too.
+      declared_elasticity: 1.4
+      declared_source: Supply-chain availability elasticity, FY25 stock-out review
+      sql: |
+        SELECT
+            d.region,
+            f.store_id,
+            SUM(f.net_revenue_inr) AS volume,
+            AVG(a.availability_pct) AS price
+        FROM fact_sales_daily AS f
+        JOIN dim_store AS d USING (store_id)
+        JOIN (
+            SELECT
+                i.store_id,
+                i.snapshot_date,
+                100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+                      / COUNT(*) AS availability_pct
+            FROM fact_inventory_snapshot AS i
+            JOIN dim_sku AS s USING (sku_id)
+            WHERE s.is_top20 AND i.snapshot_hour_ist = 12
+            GROUP BY 1, 2
+        ) AS a ON a.store_id = f.store_id AND a.snapshot_date = f.txn_date
+        WHERE f.txn_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2, f.txn_date
+
+  # A hypothesis with no elasticity query cannot be bounded, and the test
+  # says NOT_TESTABLE. It is not a pass and it is not a failure: a hard
+  # gate that cannot run must not eliminate anything.
+  not_testable_passes: true
+
+# ===========================================================================
+# TEST 3 — Dose-response. Weighted.
+# ===========================================================================
+#
+# Store-level effect against store-level cause magnitude. Across ALL
+# stores in scope, treated and untreated: restricting it to the treated
+# group would measure the spread within a group that all got the same
+# treatment, which is a different and much weaker question.
+dose_response:
+  test_id: 3
+  method: pearson_then_ols
+  min_stores: 20
+  # A cause series with no store dimension cannot have a dose. Reported,
+  # not scored zero.
+  requires_store_grain: true
+
+# ===========================================================================
+# TEST 4 — Specificity. Weighted.
+# ===========================================================================
+#
+# Stores where the cause is PRESENT against stores where it is ABSENT,
+# Welch's t-test because the two groups have no reason to share a variance.
+specificity:
+  test_id: 4
+  method: welch_t
+  min_group_size: 5
+
+# ===========================================================================
+# EXPOSURE — which stores the cause actually reached.
+# ===========================================================================
+#
+# Tests 4 and 5 both need a present-and-absent split, and it has to be the
+# SAME split or they are answering two different questions. It is derived
+# from the hypothesis's own cause series, per hypothesis: a price rise and
+# a stock-out do not reach the same stores, and a design that hands both
+# of them the same treatment group lets the second one claim the first
+# one's difference-in-differences.
+#
+# The engine holds no scenario flag. WHICH STORES WERE AFFECTED IS A
+# CONCLUSION, and reading it off a column would assume the answer.
+#
+# The rule is a robust deviation rather than a quantile. A quantile always
+# selects a fixed share of the estate, including when the cause reached
+# nobody; a deviation from the median, scaled by the median absolute
+# deviation, selects the stores that actually stand apart and selects none
+# when none do.
+exposure:
+  method: robust_deviation
+  # Median absolute deviations, adverse of the scope median. Two is the
+  # conventional outlier distance. The resulting group size is reported,
+  # never targeted.
+  sigma: 2.0
+  # Scales the median absolute deviation into a standard-deviation
+  # equivalent under normality. The conventional constant; it is written
+  # here rather than in Python so the whole rule reads in one place.
+  mad_scale: 1.4826
+  # Stores needed on EACH side. A split with nobody on one side of it is
+  # not a split, and reports NOT TESTABLE rather than a t-statistic.
+  #
+  # There is deliberately no "too many exposed" ceiling here. A threshold
+  # set from the median can never select a majority, so such a ceiling
+  # would be unreachable code pretending to be a safeguard. The case it
+  # was meant to catch — a movement that reached the whole estate — is
+  # caught upstream: QUALIFY's Gate 4 tests specificity across the estate
+  # and escalates a market-wide movement as MARKET_CASE before any of this
+  # runs.
+  min_group_size: 5
+
+# ===========================================================================
+# TEST 5 — Matched-control difference-in-differences. Weight 0.45.
+# ===========================================================================
+#
+#   did = (T_post - T_pre) - (C_post - C_pre)
+#
+# expressed against the scope's own pre-period level, so the answer is in
+# the same points as the residual it has to explain.
+did:
+  test_id: 5
+
+  matching:
+    method: nearest_neighbour_mahalanobis
+    covariates:
+      store_format:   { type: exact }
+      catchment_type: { type: exact }
+      sqft:           { type: numeric, weight: 1.0 }
+      staff_headcount: { type: numeric, weight: 1.0 }
+      pre_trend_8wk:  { type: numeric, weight: 2.0 }
+    # One control per treated store, without replacement.
+    ratio: 1
+    replacement: false
+    # A treated store with no acceptable match is DROPPED and counted, not
+    # matched to whatever was nearest. A bad match is worse than a smaller
+    # sample: it adds a difference the design was supposed to remove.
+    max_distance: 3.0
+    # What a pairing an exact covariate forbids costs the assignment.
+    # Large enough that it is never chosen while any permitted pairing
+    # remains, finite so the solver stays well conditioned.
+    forbidden_distance: 1000000.0
+
+  pretest:
+    name: parallel_trends
+    method: ols_slope_of_log_ratio
+    lookback_weeks: 8
+    min_p_value: 0.05
+    # Weekly points needed before a slope is worth fitting.
+    min_points: 3
+    # The pre-test is a test for ABSENCE of a pre-trend, so a large
+    # p-value is the pass. It can never prove parallel trends — only fail
+    # to reject them — and the evidence says so rather than claiming the
+    # design is validated.
+    interpretation: >
+      A high p-value means no pre-trend was detected, not that the trends
+      were parallel. Absence of evidence, recorded as such.
+
+  # How much of the point estimate a hypothesis may claim.
+  #
+  # A DiD is an estimate with a standard error, and attributing the point
+  # estimate claims a precision the data does not have. The attributed
+  # figure is the conservative end of the interval: the hypothesis gets
+  # what it can defend, and the rest stays unattributed where the verdict
+  # table can see it.
+  attribution:
+    method: interval_lower_bound
+    # The conventional level. Chosen because it is the convention, and the
+    # coverage that falls out of it is reported rather than aimed at.
+    confidence: 0.95
+
+# ===========================================================================
+# TEST 6 — Confounder screen. CAP.
+# ===========================================================================
+#
+# The confounders come from `causal_graph.yaml`, per hypothesis. For each
+# one, the screen asks whether it differs between the treated and control
+# groups. A confounder balanced across both is RESOLVED — the design has
+# removed it. One that differs is unresolved, and it caps confidence.
+confounder_screen:
+  test_id: 6
+  method: balance_test
+  # Stores needed on each side before a balance test says anything.
+  min_group_size: 2
+  # Welch's t on the confounder's own measure across the two groups. A
+  # p-value above this means balanced.
+  min_balance_p: 0.05
+
+  # How each confounder is measured across the two groups. A confounder
+  # with no measure is UNMEASURABLE, which is not the same as resolved and
+  # is reported as its own outcome.
+  measures:
+    promo_lapse:
+      label: Marketing spend per store-week
+      source_system: marketing_spend
+      scope_level: region
+      note: >
+        Marketing is booked by region, so it cannot differ between two
+        groups of stores inside one region. Balanced by construction, and
+        that is a real answer rather than an untested one.
+    weather:
+      label: Rainfall over the period
+      source_system: weather_feed
+      scope_level: region
+      note: Weather is a city-level feed inside one region.
+    calendar_shift:
+      label: Festival and promo days in the period
+      source_system: promo_calendar
+      scope_level: region
+      note: The calendar is identical for every store in a region.
+    stock_out:
+      label: Top-20 on-shelf availability
+      source_system: wms
+      scope_level: store
+      sql: |
+        SELECT
+            d.region,
+            i.store_id,
+            100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+                  / COUNT(*) AS value
+        FROM fact_inventory_snapshot AS i
+        JOIN dim_store AS d USING (store_id)
+        JOIN dim_sku   AS s USING (sku_id)
+        WHERE s.is_top20
+          AND i.snapshot_hour_ist = 12
+          AND i.snapshot_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+    footfall_decline:
+      label: Counted footfall per store
+      source_system: footfall
+      scope_level: store
+      sql: |
+        SELECT
+            d.region,
+            f.store_id,
+            SUM(f.footfall) AS value
+        FROM fact_footfall_daily AS f
+        JOIN dim_store AS d USING (store_id)
+        WHERE f.counter_installed
+          AND f.footfall_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+    price_increase:
+      label: Average selling price per store
+      source_system: pos
+      scope_level: store
+      sql: |
+        SELECT
+            d.region,
+            k.store_id,
+            SUM(k.net_revenue_inr) / NULLIF(SUM(k.units), 0) AS value
+        FROM fact_sales_daily_sku AS k
+        JOIN dim_store AS d USING (store_id)
+        WHERE k.txn_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+    competitor_action:
+      label: Competitor activity in the catchment
+      source_system: competitor_news
+      scope_level: matched
+      resolved_by: catchment_type
+      note: >
+        The organisation holds no competitor pricing and no competitor
+        footfall, so competitor activity cannot be measured per store and a
+        balance test on it is not available. What the design can say is
+        narrower and true: treated stores were selected by SIZE, and each
+        is matched to a control in the same catchment type, so a competitor
+        opening is no more likely to sit beside a treated store than beside
+        its control. The claim is that the matching removes it, not that it
+        was measured.
+    staffing_shortfall:
+      label: Staff headcount per store
+      source_system: erp
+      scope_level: store
+      sql: |
+        SELECT region, store_id, staff_headcount AS value
+        FROM dim_store
+        WHERE region = $scope
+    assortment_change:
+      label: Ranged top-20 SKUs carried per store
+      source_system: wms
+      scope_level: store
+      # Breadth, not depth. A deranged SKU leaves the assortment; a stocked
+      # out one stays ranged and empty. That is the denominator CLAUDE.md
+      # uses to tell the two apart.
+      sql: |
+        SELECT
+            d.region,
+            i.store_id,
+            COUNT(DISTINCT CASE WHEN i.is_ranged THEN i.sku_id END) AS value
+        FROM fact_inventory_snapshot AS i
+        JOIN dim_store AS d USING (store_id)
+        WHERE i.snapshot_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+    transport_disruption:
+      label: Total top-20 units on hand per store
+      source_system: wms
+      scope_level: store
+      # Depth, against assortment_change's breadth. A delivery that did not
+      # arrive empties what is there; a range change removes lines.
+      sql: |
+        SELECT
+            d.region,
+            i.store_id,
+            SUM(i.on_hand_units) AS value
+        FROM fact_inventory_snapshot AS i
+        JOIN dim_store AS d USING (store_id)
+        WHERE i.snapshot_hour_ist = 12
+          AND i.snapshot_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+    store_closure:
+      label: Trading days with no revenue
+      source_system: pos
+      scope_level: store
+      sql: |
+        SELECT
+            region,
+            store_id,
+            SUM(CASE WHEN net_revenue_inr <= 0 THEN 1 ELSE 0 END) AS value
+        FROM fact_sales_daily
+        WHERE txn_date BETWEEN $window_start AND $window_end
+          AND region = $scope
+        GROUP BY 1, 2
+    mix_shift:
+      label: Share of revenue from the top-20 assortment
+      source_system: pos
+      scope_level: store
+      sql: |
+        SELECT
+            d.region,
+            k.store_id,
+            100.0 * SUM(CASE WHEN s.is_top20 THEN k.net_revenue_inr ELSE 0 END)
+                  / NULLIF(SUM(k.net_revenue_inr), 0) AS value
+        FROM fact_sales_daily_sku AS k
+        JOIN dim_sku   AS s USING (sku_id)
+        JOIN dim_store AS d USING (store_id)
+        WHERE k.txn_date BETWEEN $window_start AND $window_end
+          AND d.region = $scope
+        GROUP BY 1, 2
+
+  # A region-level confounder cannot differ between two groups of stores
+  # inside one region. Recorded as resolved WITH THE REASON, so a reader
+  # can see it was reasoned about rather than skipped.
+  region_level_resolves: true
+
+# ===========================================================================
+# ELIMINATION
+# ===========================================================================
+#
+# A hard-gate failure eliminates the hypothesis outright, with a
+# machine-readable reason. Not a low score — eliminated. A hypothesis that
+# cannot have caused the movement does not get to contribute a weighted
+# vote to the confidence in something that did.
+elimination:
+  # A hypothesis that failed BOTH hard gates is reported as having failed
+  # both, comma-separated in gate order. A case file that names one of two
+  # failures is hiding the other.
+  reasons:
+    precedence: The cause began after the effect did.
+    sufficiency: The hypothesis cannot produce a movement this size.
+  # A hard gate that could not be RUN does not eliminate. "We could not
+  # test this" and "this is false" are different findings.
+  not_testable_eliminates: false

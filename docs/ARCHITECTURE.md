@@ -46,6 +46,20 @@ restated, just located.
 | The single way to publish a number | `engine/evidence.py::EvidenceFactory` |
 | What an evidence record may say about where it came from and how it was made | `semantic_layer/warehouse.yaml` → `evidence` |
 | The floor rule, and what it blocks | `engine/evidence.py::can_promote_to_explained` |
+| Where hypotheses come from, and the screen to five | `semantic_layer/gather.yaml` → `hypotheses` |
+| One query template per hypothesis type | `semantic_layer/gather.yaml` → `structured.templates` |
+| BM25 and the in-memory embeddings | `engine/gather/retrieval.py` |
+| The classifier, and the line it does not cross | `llm/classify.py` |
+| Why a model call did not happen | table `llm_cache` |
+| What a committed fixture is and is not | `llm/fixtures/README.md` |
+| What each of the six tests READS — every series, every SQL statement | `semantic_layer/adjudicate.yaml` |
+| What each of the six tests is WORTH — weights, gates, caps | `semantic_layer/adjudication.yaml` → `tests` |
+| Which stores a hypothesis's cause reached, and how that is derived rather than read | `semantic_layer/adjudicate.yaml` → `exposure` |
+| What a hypothesis is allowed to claim from a DiD | `semantic_layer/adjudicate.yaml` → `did.attribution` |
+| What happens when an elasticity cannot be fitted from history | `semantic_layer/adjudicate.yaml` → `sufficiency.elasticity.fallback` |
+| How each confounder in the causal graph is measured | `semantic_layer/adjudicate.yaml` → `confounder_screen.measures` |
+| Why a hypothesis was eliminated, in one machine-readable word | `engine/adjudicate/gate.py` → `HypothesisVerdict.elimination_reason` |
+| The price/volume/mix split, and why it is LMDI | `engine/contribution/decomposition.py` |
 | The narrow companion for pipeline metadata, and its allow-list | `engine/db.py::execute_metadata`, `semantic_layer/warehouse.yaml` → `governance.metadata_tables` |
 | Gate 1's five checks and every threshold they use | `semantic_layer/validate.yaml` |
 | Gates 2–5, and the restraint that limits how many cases open | `semantic_layer/qualify.yaml` |
@@ -71,6 +85,13 @@ listed here only so you know they are architectural and not stylistic:
 - contribution (WHERE) and causation (WHY) stay in separate modules and separate panels (rule 7)
 - `MOCK_LLM=true` must work from day one (rule 8)
 - no frontend work before P9 is green (rule 9)
+- **no model call anywhere under `engine/adjudicate/`** — asserted statically by
+  `tests/test_adjudicate.py::test_nothing_under_adjudicate_imports_the_model_layer`
+- **`engine/contribution/` cannot import `engine/adjudicate/`** — asserted statically by
+  `tests/test_contribution.py::test_contribution_cannot_import_adjudicate`
+- **the engine reads no scenario flag.** Which stores an event reached is a conclusion of
+  Tests 3, 4 and 5, derived from the cause series; asserted by
+  `tests/test_adjudicate.py::test_the_engine_reads_no_scenario_flag`
 
 ## Related
 
