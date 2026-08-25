@@ -79,6 +79,33 @@ class AppliedPolicy:
     def unrestricted(self) -> bool:
         return not self.bindings and not self.masked_columns
 
+    @classmethod
+    def for_metadata(
+        cls, table: str, persona: str, unrestricted_predicate: str
+    ) -> AppliedPolicy:
+        """The policy for reading a pipeline-metadata table.
+
+        No row filter and no mask, because these tables carry the
+        warehouse's account of itself — the calendar, the case registry,
+        the definition log — and there is nothing in them a predicate
+        would protect. The allow-list in `warehouse.yaml -> governance`
+        is what keeps a business table off that path, and a load-time
+        check refuses any entry starting `fact_`, `doc_` or `ext_`.
+
+        It exists as a NAMED constructor so that this module remains the
+        only place an `AppliedPolicy` is built. A caller assembling one
+        inline would be choosing its own predicate and its own mask list,
+        which is the definition of a bypass, and a static test asserts
+        nothing does.
+        """
+        return cls(
+            kpi=table,
+            persona=persona,
+            row_predicate=unrestricted_predicate,
+            masked_columns=(),
+            bindings={},
+        )
+
 
 def bind_names(sql: str) -> set[str]:
     """Every `:name` placeholder in a fragment of SQL.

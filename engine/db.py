@@ -251,12 +251,8 @@ def execute_metadata(
     statement = to_duckdb_params(sql.strip().rstrip(";"))
     bindings = _bindings_used(statement, dict(params or {}))
 
-    policy = AppliedPolicy(
-        kpi=table,
-        persona=user.persona,
-        row_predicate=governance.unrestricted_predicate,
-        masked_columns=(),
-        bindings={},
+    policy = AppliedPolicy.for_metadata(
+        table, user.persona, governance.unrestricted_predicate
     )
     try:
         cursor = connection.execute(statement, bindings) if bindings else connection.execute(
@@ -406,6 +402,11 @@ def _audit(
         rows_returned=rows_returned,
         rows_filtered=rows_filtered,
         columns_masked=columns_masked,
+        # A read releases nothing. Rows become prompt text only through
+        # security/redaction.py, which writes its own row with its own
+        # count — see the note in security/audit.py on the two kinds of
+        # access.
+        rows_released_to_llm=0,
         purpose=purpose,
     )
     try:
@@ -418,8 +419,9 @@ def _audit(
 #: to it by a caller or read from a .sql file.
 AUDIT_INSERT = (
     "INSERT INTO audit_log (audit_id, occurred_at, user_id, persona, kpi, "
-    "statement_hash, row_predicate, rows_returned, rows_filtered, columns_masked, purpose) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "statement_hash, row_predicate, rows_returned, rows_filtered, columns_masked, "
+    "rows_released_to_llm, purpose) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 

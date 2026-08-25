@@ -67,6 +67,12 @@ store_size:
   sqft_sigma: 420
   staffing_per_1000_sqft: 2.6
 
+  # Blended monthly cost of one store employee, fully loaded. Only used to
+  # give `dim_store.staff_cost` a real value: the access policy masks that
+  # column from a regional head, and a mask over a column that does not
+  # exist is a mask nobody can test.
+  monthly_cost_per_head_inr: 28000
+
 # --------------------------------------------------------------------------
 # Product catalogue. Deliberately small — the top-20 SKUs are what the
 # availability metric measures, and a 60-SKU catalogue keeps the inventory
@@ -256,9 +262,13 @@ users:
     - user_id: U001
       display_name: Ananya Rao
       persona: cxo
+    # The three P13 names the access-policy tests are written against.
+    # Vikram moves from finance_controller to cco: qualify.yaml already
+    # escalates to `cco` and no user held it, so the roster had a role
+    # the config referred to and nobody occupied.
     - user_id: U002
       display_name: Vikram Shetty
-      persona: finance_controller
+      persona: cco
     - user_id: U003
       display_name: Priya Menon
       persona: regional_manager
@@ -271,10 +281,12 @@ users:
       display_name: Sunita Kaur
       persona: regional_manager
       region: North
+    # Arjun moves from regional_manager/South to analyst. An analyst is
+    # unscoped: the investigation reads every region or it cannot compare
+    # them, which is the whole point of the regional residual strip.
     - user_id: U006
       display_name: Arjun Iyer
-      persona: regional_manager
-      region: South
+      persona: analyst
     - user_id: U007
       display_name: Farhan Qureshi
       persona: store_manager
@@ -283,6 +295,10 @@ users:
     - user_id: U008
       display_name: Meera Joshi
       persona: analyst
+    - user_id: U009
+      display_name: Rhea Nair
+      persona: regional_head_west
+      region: West
 
 # --------------------------------------------------------------------------
 # Footfall instrumentation. Partial by design — this is what makes #2467's

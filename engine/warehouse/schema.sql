@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS dim_store (
     catchment_type            VARCHAR NOT NULL,
     sqft                      INTEGER NOT NULL,
     staff_headcount           INTEGER NOT NULL,
+    -- The two columns the access policy actually masks.
+    --   staff_cost  monthly payroll. Compensation, so a regional head
+    --               does not see it across their own estate.
+    --   staff_id    roster key of the person accountable for the store.
+    --               It identifies a human being.
+    -- Both are real columns on purpose: a mask over a column that does
+    -- not exist never fires, and the test that asserts it is absent from
+    -- an LLM payload would pass for the wrong reason.
+    staff_cost                BIGINT  NOT NULL,
+    staff_id                  VARCHAR NOT NULL,
     size_index                DOUBLE  NOT NULL,
     has_footfall_counter      BOOLEAN NOT NULL,
     is_treated_2451           BOOLEAN NOT NULL,
@@ -504,6 +514,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     rows_returned    BIGINT  NOT NULL,
     rows_filtered    BIGINT  NOT NULL,
     columns_masked   VARCHAR NOT NULL,
+    -- How many rows crossed the trust boundary into a model prompt.
+    --
+    -- A READ writes 0: at the moment execute_governed returns, nothing
+    -- has gone anywhere. A RELEASE is a separate access event with its
+    -- own row and its own count, because handing rows to a third party
+    -- is a different thing from reading them and the log should not have
+    -- to be interpreted to tell the two apart.
+    rows_released_to_llm BIGINT NOT NULL DEFAULT 0,
     purpose          VARCHAR
 );
 

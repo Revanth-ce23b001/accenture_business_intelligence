@@ -158,9 +158,34 @@ access_policy:
     store_manager:
       row_predicate: "store_id = :user_store_id"
       masked_columns: [staff_cost, staff_headcount, margin_pct]
+    # --- P13's three named personas -----------------------------------
+    #
+    # regional_head_west  Rhea. Scoped to her own region by the SAME bind
+    #                     every scoped predicate uses, so the name says
+    #                     West and the predicate reads the user's region:
+    #                     a regional head with no region is refused, never
+    #                     widened. staff_cost is masked because
+    #                     compensation across her estate is not hers to
+    #                     see, and staff_id because it names a person.
+    # cco                 Vikram. Every region, because a chief commercial
+    #                     officer comparing regions is the job. staff_id
+    #                     stays masked: per-person visibility of staff
+    #                     beside performance data is a disciplinary risk
+    #                     nobody asked for, and a CCO does not need the
+    #                     roster key to read a case.
+    # analyst             Arjun. Every region, nothing masked. The
+    #                     investigation joins the roster and the payroll
+    #                     to test a staffing hypothesis, and an analyst
+    #                     who cannot see the columns cannot run the test.
+    regional_head_west:
+      row_predicate: "region = :user_region"
+      masked_columns: [staff_cost, staff_id]
+    cco:
+      row_predicate: "TRUE"
+      masked_columns: [staff_id]
     analyst:
       row_predicate: "TRUE"
-      masked_columns: [customer_phone, customer_email, staff_cost]
+      masked_columns: []
 
 confidence_rules:
   required_sources: [pos, footfall, erp]

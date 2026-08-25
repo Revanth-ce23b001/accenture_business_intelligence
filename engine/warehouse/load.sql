@@ -15,7 +15,7 @@
 
 INSERT INTO dim_store
 SELECT store_id, outlet_id, region, city, store_format, catchment_type,
-       sqft, staff_headcount, size_index,
+       sqft, staff_headcount, staff_cost, staff_id, size_index,
        has_footfall_counter, is_treated_2451, is_matched_control_2451
 FROM read_csv_auto('{raw}/dim/dim_store.csv');
 

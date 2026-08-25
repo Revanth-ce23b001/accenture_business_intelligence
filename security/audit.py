@@ -9,6 +9,19 @@ The statement itself is not stored. A hash is, which is enough to prove
 two calls ran the same query and to link a displayed number back to the
 statement that produced it, without copying customer-scoped SQL into a
 table with different access rules from the one it read.
+
+TWO KINDS OF ACCESS, and the log distinguishes them by construction.
+
+A READ is `execute_governed` returning rows to Python. It records what
+the policy did — the predicate, the rows withheld, the columns dropped —
+and `rows_released_to_llm` is 0, because at that moment nothing has left
+the process.
+
+A RELEASE is those rows being serialised into a model prompt, which is a
+different act against a different party and gets its own row with its own
+count. Folding the two together would mean reading the log to work out
+whether a number ever left the building, and "did this leave" is the
+question an auditor actually asks.
 """
 
 from __future__ import annotations
@@ -47,7 +60,15 @@ class AuditRecord:
     rows_returned: int
     rows_filtered: int
     columns_masked: tuple[str, ...]
+    #: Rows that crossed the trust boundary into a model prompt. Zero on a
+    #: read; set only by `security/redaction.py`, which is the one place
+    #: warehouse rows are allowed to become prompt text.
+    rows_released_to_llm: int = 0
     purpose: str | None = None
+
+    @property
+    def released(self) -> bool:
+        return self.rows_released_to_llm > 0
 
     @classmethod
     def for_query(
@@ -61,6 +82,7 @@ class AuditRecord:
         rows_returned: int,
         rows_filtered: int,
         columns_masked: tuple[str, ...],
+        rows_released_to_llm: int = 0,
         purpose: str | None = None,
     ) -> AuditRecord:
         return cls(
@@ -74,6 +96,7 @@ class AuditRecord:
             rows_returned=rows_returned,
             rows_filtered=rows_filtered,
             columns_masked=columns_masked,
+            rows_released_to_llm=rows_released_to_llm,
             purpose=purpose,
         )
 
@@ -97,6 +120,7 @@ class AuditRecord:
             self.rows_returned,
             self.rows_filtered,
             COLUMN_SEPARATOR.join(self.columns_masked),
+            self.rows_released_to_llm,
             self.purpose,
         )
 

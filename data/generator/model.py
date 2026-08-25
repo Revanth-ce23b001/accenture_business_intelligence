@@ -324,6 +324,26 @@ def build_stores(entity: dict[str, Any], streams: Streams) -> pd.DataFrame:
                     "staff_headcount": int(
                         round(sqft[i] / 1000.0 * size_cfg["staffing_per_1000_sqft"])
                     ),
+                    # The two columns the access policy masks, and they
+                    # have to be REAL. A mask over a column that does not
+                    # exist is a mask that never fires, and a test
+                    # asserting the column is absent from an LLM payload
+                    # passes for the wrong reason. Both are DERIVED — no
+                    # draw from `rng` — so adding them leaves every other
+                    # series in the world byte-identical.
+                    #
+                    # staff_cost   monthly payroll for the store.
+                    #              Compensation, so a regional head does
+                    #              not see it across their own estate.
+                    # staff_id     roster key of the person accountable
+                    #              for the store. It identifies a human
+                    #              being, which is why it is masked from
+                    #              everyone whose job does not need it.
+                    "staff_cost": int(
+                        round(sqft[i] / 1000.0 * size_cfg["staffing_per_1000_sqft"])
+                    )
+                    * int(size_cfg["monthly_cost_per_head_inr"]),
+                    "staff_id": f"E{store_seq + 40000:06d}",
                     "size_index": float(scale[i]),
                 }
             )

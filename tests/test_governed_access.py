@@ -225,10 +225,20 @@ def test_masked_columns_are_dropped_from_the_result(warehouse, users, layer):
     assert all("city" in row for row in rows)
 
 
-def test_only_masked_columns_present_in_the_result_are_reported(warehouse, users):
-    """The analyst masks `staff_cost`, which this query never selected."""
+def test_only_masked_columns_present_in_the_result_are_reported(warehouse, users, layer):
+    """The CCO masks `staff_id`, which this query never selected.
+
+    Repointed at the CCO in P13. It used to run as the analyst, whose mask
+    list is now empty, so it would have passed because there was nothing
+    to report rather than because nothing selected was masked — a test
+    that holds for the wrong reason is worse than one that fails.
+    """
+    policy = layer.kpis["net_revenue"].access_policy.personas["cco"]
+    assert policy.masked_columns == ["staff_id"]
+    assert "staff_id" not in STORE_QUERY
+
     _rows, _filtered, masked = execute_governed(
-        by_persona(users, "analyst"), "net_revenue", STORE_QUERY, connection=warehouse
+        by_persona(users, "cco"), "net_revenue", STORE_QUERY, connection=warehouse
     )
     assert masked == ()
 
