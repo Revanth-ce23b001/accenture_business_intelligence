@@ -17,7 +17,7 @@ action: |
 cost_model:
   type: per_store_unit_cost
   unit: store_week
-  scales_with: affected_store_count
+  scales_with: affected_store_weeks
   unit_cost_inr: 24000
   fixed_cost_inr: 0
   currency: INR

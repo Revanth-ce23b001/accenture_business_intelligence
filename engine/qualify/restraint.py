@@ -242,15 +242,23 @@ def register_case(
     period: str,
     opened_at: datetime,
     materiality_multiple: float | None = None,
+    status: str = OPEN_STATUS,
+    linked_from_case_id: str | None = None,
 ) -> None:
-    """Write the `case_registry` row. A write, so it does not go through a reader."""
+    """Write the `case_registry` row. A write, so it does not go through a reader.
+
+    `linked_from_case_id` is set only by RECOMMEND, when a playbook's
+    linked-case template raises the cause of the cause. A case a movement
+    opened has no parent and leaves it null.
+    """
     from engine.db import as_stored_timestamp
 
     connection.execute(
         """
         INSERT INTO case_registry
-            (case_id, kpi, scope, grain, period, opened_at, status, materiality_multiple)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (case_id, kpi, scope, grain, period, opened_at, status,
+             materiality_multiple, linked_from_case_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             case_id,
@@ -259,8 +267,9 @@ def register_case(
             grain,
             period,
             as_stored_timestamp(opened_at),
-            OPEN_STATUS,
+            status,
             materiality_multiple,
+            linked_from_case_id,
         ],
     )
 

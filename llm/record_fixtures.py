@@ -329,7 +329,67 @@ def record_for_case(
                 )
             )
 
+    written.extend(record_narratives(live=live, fixtures_dir=fixtures_dir, layer=layer))
+
     connection.close()
+    return written
+
+
+def record_narratives(
+    *,
+    live: bool,
+    fixtures_dir: Path | None = None,
+    layer=None,
+) -> list[Path]:
+    """One fixture per scenario per persona. Five by three, fifteen calls.
+
+    Walks the same request builder `llm/narrate.py` walks, so a fixture
+    recorded here is a fixture the narrator will find. The offline text
+    comes from the template walker in `llm/stand_in.py` and is labelled
+    SYNTHETIC; the live text comes from Sonnet and is not.
+
+    NO REGENERATION FIXTURE IS RECORDED, and that is a statement about the
+    recording rather than about the loop. The regeneration request is
+    built from the FEEDBACK on a failed first pass, so it only exists when
+    a first pass fails. All fifteen of these ground first time, so the
+    second call is never made and a fixture for it would be a recording of
+    something that never happens. The loop itself is exercised against
+    injected failures in tests/test_grounding.py, where the failure is the
+    point.
+    """
+    from llm.casefiles import CASE_IDS, frozen
+    from llm.narrate import build_request as build_narrative_request
+    from llm.stand_in import synthesise_narrative
+
+    if layer is None:
+        from semantic_layer.schema import load_semantic_layer
+
+        layer = load_semantic_layer()
+    fixtures_dir = Path(fixtures_dir) if fixtures_dir else FIXTURE_DIR
+    provider = get_provider() if live else None
+
+    written: list[Path] = []
+    for case_id in CASE_IDS:
+        adjudication = frozen(case_id, layer)
+        for persona in sorted(layer.narrate.personas):
+            call = build_narrative_request(adjudication, persona, layer)
+            written.append(
+                _write(
+                    Recording(
+                        request=call,
+                        text=(
+                            provider.complete(call).text
+                            if live
+                            else synthesise_narrative(adjudication, persona, layer)
+                        ),
+                        note=f"narrative, case #{case_id}, persona {persona}"
+                        if live
+                        else SYNTHETIC_NOTE,
+                        synthetic=not live,
+                    ),
+                    fixtures_dir,
+                )
+            )
     return written
 
 
@@ -377,6 +437,7 @@ __all__ = [
     "SYNTHETIC_NOTE",
     "Recording",
     "record_for_case",
+    "record_narratives",
     "synthesise_classification",
     "synthesise_hypotheses",
 ]

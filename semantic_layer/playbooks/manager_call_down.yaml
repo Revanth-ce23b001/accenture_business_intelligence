@@ -1,0 +1,77 @@
+# Manager call-down — the cheapest investigation in the book.
+#
+# Filed under `competitor_action` deliberately. A call-down is not really
+# driver-specific — a manager who was in the shop that week can speak to
+# any of them — but a playbook has one driver, and this is the driver it
+# can actually move. Competitor activity is structurally unverifiable
+# here: the two feeds that would test it are not held, and no amount of
+# analysis on data we do have will change that. A phone call to somebody
+# who watched the competitor's shopfront for a month is the only
+# instrument the organisation currently owns that points at it.
+#
+# It buys INFORMATION, so it carries the null recovery curve. What ranks
+# it first on #2467 is not recovery, it is arithmetic: it costs a morning.
+
+playbook: manager_call_down
+version: 1
+
+driver: competitor_action
+lever: corroborate_from_store_notes
+
+action: |
+  Call the cluster managers who own the stores in scope and ask three
+  questions in this order: what changed in the catchment, what changed on
+  the shelf, and what customers said at the till.
+
+  Ask in that order and do not lead. A manager asked "did a competitor
+  run a promotion?" will remember one; a manager asked "what changed?"
+  will tell you the road was dug up. The whole value of this playbook is
+  that it collects unprompted observations, and a leading question
+  destroys it — the note it produces then corroborates nothing, because
+  the hypothesis put the words in the manager's mouth.
+
+  File every answer as a store note against the store, not as a summary
+  against the region. A note the retrieval lane can find later is worth
+  more than a briefing nobody can cite.
+
+cost_model:
+  type: per_manager_hour
+  unit: manager_hour
+  scales_with: manager_hours
+  unit_cost_inr: 1500
+  fixed_cost_inr: 0
+  currency: INR
+  note: >
+    A fully-loaded cluster manager-hour. Manager-hours come from the case:
+    the stores in scope, divided by the span of control, times the hours
+    each manager spends on the phone — all three in
+    semantic_layer/recommend.yaml -> call_down.
+
+lead_time:
+  value: 2
+  unit: days
+  note: >
+    One working day to brief and schedule, one to run the calls. The only
+    lever in the book that can report back inside a week.
+
+owner_role: retail_operations_lead
+
+recovery_curve_ref: instrumentation_none
+
+monitoring_plan:
+  primary_kpi: conversion_rate
+  secondary_kpis: [net_revenue, transactions]
+  cadence: weekly
+  horizon_weeks: 2
+  checkpoints:
+    - at_week: 1
+      expect: Calls complete for at least three quarters of the stores in scope.
+    - at_week: 2
+      expect: >
+        Notes filed and indexed, and the unstructured lane re-run over
+        them so the case sees what the calls found.
+  kill_criterion: >
+    If the notes come back uniformly empty — no manager reports anything
+    changing in any catchment — stop. Uniform silence is a finding: it
+    says the cause is not local, and further calls will not find it.
+  escalation_role: retail_operations_lead

@@ -34,19 +34,22 @@ preconditions:
 
 cost_model:
   type: margin_forgone
-  unit: percent_of_affected_revenue
-  scales_with: affected_revenue
+  unit: percent_of_revenue_at_risk
+  scales_with: revenue_at_risk
   unit_cost_inr: null
   fixed_cost_inr: 0
   currency: INR
   depth_source: observed_price_increase
   note: >
     Cost is the margin given up: the rollback depth applied to the
-    affected revenue the case identifies. The depth is NOT a playbook
-    constant — it comes from the price increase the case actually
-    observed in the pricing log. There is no per-store rate; exposure
-    scales with revenue, not store count, which is what makes this lever
-    expensive at regional scope.
+    revenue the case says is actually in play. The depth is NOT a
+    playbook constant — it comes from the price increase the case
+    observed in the pricing log. Where no price event was observed there
+    is no depth to apply, and the lever is quoted at the full gross
+    margin carried by that revenue instead
+    (recommend.yaml -> cost.unobserved_depth). There is no per-store
+    rate; exposure scales with revenue, not store count, which is what
+    makes this lever expensive at regional scope.
 
 lead_time:
   value: 3

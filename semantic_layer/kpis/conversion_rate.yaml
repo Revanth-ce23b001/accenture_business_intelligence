@@ -98,6 +98,33 @@ drivers:
   - on_shelf_availability
   - avg_selling_price
 
+# Who signs off an action on this KPI, by the CAUSAL driver the case
+# adjudicated.
+#
+# `drivers` above is the KPI decomposition — WHERE the movement sits.
+# This is WHY it moved and who owns the why. They are deliberately
+# different lists (CLAUDE.md rule 7) and they are owned by different
+# people, which is the whole reason RECOMMEND cannot read the first one.
+#
+# A playbook also carries an `owner_role`, but that is whoever owns the
+# LEVER in general. Where the two disagree THIS FILE WINS: who answers for
+# a movement in this KPI is a decision the business made about the KPI,
+# not a property of expedited freight. The recommendation records the
+# override rather than resolving it quietly.
+driver_ownership:
+  default: { role: retail_operations_lead, title: Retail Operations Lead }
+  by_driver:
+    stock_out:                { role: regional_supply_chain_lead, title: Regional Supply Chain Lead }
+    price_increase:           { role: category_director,       title: Category Director }
+    competitor_action:        { role: category_director,       title: Category Director }
+    promo_lapse:              { role: marketing_director,      title: Marketing Director }
+    footfall_decline:         { role: retail_operations_lead,  title: Retail Operations Lead }
+    staffing_shortfall:       { role: retail_operations_lead,  title: Retail Operations Lead }
+    weather:                  { role: retail_operations_lead,  title: Retail Operations Lead }
+    channel_cannibalisation:  { role: ecommerce_lead,          title: E-commerce Lead }
+    calendar_shift:           { role: finance_controller,      title: Finance Controller }
+    data_incident:            { role: data_platform_lead,      title: Data Platform Lead }
+
 related_kpis:
   - net_revenue
   - transactions

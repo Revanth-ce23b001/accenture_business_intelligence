@@ -1,0 +1,295 @@
+# RECOMMEND — what to do about it, and what it costs to find out.
+#
+# The stage after VERDICT. Two shapes come out of it and they are not the
+# same object wearing a different label:
+#
+#   a case that reached a verdict   ->  an ACTION, with a cost, an expected
+#                                       recovery band and an owner who can
+#                                       sign it off
+#   a case that abstained           ->  an INVESTIGATION, ranked by value
+#                                       per rupee, plus at least one thing
+#                                       we are explicitly advising AGAINST
+#
+# The second is the one that is unusual, and it is the honest output of an
+# abstention. "We do not know" is only useful when it is followed by "and
+# here is what it would cost to find out, in this order".
+#
+# EVERY NUMBER IN THIS FILE IS A BUSINESS INPUT. None of them is a
+# statistic. The rates belong to procurement, the span of control belongs
+# to retail operations, the margin rate belongs to finance. The engine
+# multiplies them by quantities the CASE measured and never supplies one
+# of its own (CLAUDE.md rule 2).
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# 1. MATCHING. A recommendation is attached to the ADJUDICATED driver.
+#
+# Not to the KPI, not to the biggest correlation, and not to a model's
+# opinion. #2451's leading hypothesis is `stock_out`, so the playbook is
+# the one whose driver is `stock_out`. Had adjudication eliminated it, the
+# playbook would have gone with it.
+# ---------------------------------------------------------------------------
+matching:
+  match_on: adjudicated_driver
+
+  # Levers that buy INFORMATION rather than recovery. A playbook carrying
+  # one of these can never be the action on a decided case — it recovers
+  # nothing — and is always an investigation on an abstained one.
+  information_levers:
+    - acquire_missing_source
+    - corroborate_from_store_notes
+
+  # More than one playbook can carry a driver: `competitor_action` has
+  # both a feed subscription and a manager call-down. On a decided case
+  # the recovering lever wins; ties break on lead time, shortest first,
+  # because a recovery that lands in two weeks is worth more than the same
+  # recovery in six.
+  prefer_recovering_lever: true
+  tie_break: shortest_lead_time
+
+  # No playbook carries this driver. Reported as an outcome rather than
+  # papered over with a generic "investigate further".
+  no_playbook_outcome: NO_PLAYBOOK_FOR_DRIVER
+
+# ---------------------------------------------------------------------------
+# 2. COST. The playbook supplies a RATE; the case supplies a QUANTITY.
+#
+# That split is the whole point. INR 53,000 per store is a procurement
+# fact and lives in the playbook. Thirty-four stores is a finding and
+# lives in the case. Neither file can produce the cost on its own, which
+# is what stops INR 18 L from ever becoming a constant somebody typed in.
+# ---------------------------------------------------------------------------
+cost:
+  # A playbook's `cost_model.scales_with` must name one of these. Each is
+  # a quantity the case measures and hands over as a cost basis; a
+  # playbook naming anything else fails to load.
+  bases:
+    none: >
+      The cost does not scale. An annual licence costs the same whether
+      the case covers three stores or three hundred.
+    treated_store_count: >
+      Stores the adjudicated mechanism actually reached — ADJUDICATE's
+      treated group, not every store in the region.
+    affected_store_count: >
+      Stores inside the case scope carrying the condition the lever
+      addresses. Wider than treated where the lever is preventative.
+    uninstrumented_store_count: >
+      Stores in scope lacking the sensor the hypothesis needs. What an
+      instrumentation playbook is priced against, and it is measured in
+      THIS case's scope — a count borrowed from another region prices the
+      wrong estate.
+    affected_store_weeks: >
+      Affected stores multiplied by the weeks the lever runs for. A wage
+      uplift is not a one-off purchase; pricing it per store and forgetting
+      the horizon understates it by the length of the roster cycle.
+    manager_hours: >
+      Manager-hours a call-down consumes: managers multiplied by the hours
+      each spends on the phone. Derived from `call_down` below.
+    revenue_at_risk: >
+      The revenue the lever would be acting on. For a lever chasing an
+      unexplained movement that is the qualified residual's revenue
+      equivalent — the money actually in play, not the scope's turnover.
+
+  # How a cost model type combines its rate with its basis.
+  types:
+    per_store_unit_cost:
+      arithmetic: rate_times_basis
+      description: A per-unit rate multiplied by a counted quantity.
+    annual_subscription:
+      arithmetic: rate_times_basis
+      description: A recurring licence. Scales with nothing; basis `none` is 1.
+    per_manager_hour:
+      arithmetic: rate_times_basis
+      description: An hourly rate multiplied by manager-hours.
+    margin_forgone:
+      arithmetic: depth_times_basis
+      description: >
+        Margin given away rather than money spent. The depth is not a
+        playbook constant — see `depth_sources`.
+
+  # Where `cost_model.depth_source` gets its depth.
+  depth_sources:
+    observed_price_increase: >
+      The price movement the case observed in the pricing log. This is the
+      only honest depth for a price rollback: you can only give back a
+      price rise that happened.
+
+  # What a depth-priced lever risks when its depth cannot be observed.
+  #
+  # This is the #2467 case and it is why the price response is refused.
+  # There is no price event in the East pricing log, so there is no
+  # rollback depth to price. The lever is not therefore free: what it puts
+  # at risk is the GROSS MARGIN carried by the revenue it would be
+  # chasing, because a rollback deep enough to win that revenue back gives
+  # away at least the margin inside it.
+  unobserved_depth:
+    basis: revenue_at_risk
+    multiplier: gross_margin_rate
+    note: >
+      Priced as full margin forgone, deliberately. A lever fired on a
+      hypothesis nobody confirmed is quoted at what it can lose, not at an
+      optimistic depth nobody measured.
+
+  display_unit: INR_L
+
+# ---------------------------------------------------------------------------
+# 3. ECONOMICS. Finance's numbers and retail operations' rate card.
+# ---------------------------------------------------------------------------
+economics:
+  gross_margin_rate: 0.64
+  gross_margin_basis: >
+    Blended gross margin across the four regions for the trailing twelve
+    months, net of returns and markdown, as carried in the finance pack.
+    Used only to turn a revenue exposure into a margin exposure; no
+    recovery figure is computed from it.
+
+  manager_hour_inr: 1500.0
+  manager_hour_basis: >
+    A cluster manager-hour, fully loaded. Retail operations' rate card.
+
+# ---------------------------------------------------------------------------
+# 4. CALL-DOWN. The cheapest investigation there is, and the one every
+# case is offered, because ringing the people who were standing in the
+# shop costs a morning and settles more cases than any feed.
+#
+# Managers, not stores: an incident call-down goes to the cluster manager
+# who owns the affected stores, and one manager works through four store
+# conversations in a sitting. Both numbers are retail operations'.
+# ---------------------------------------------------------------------------
+call_down:
+  playbook: manager_call_down
+  span_of_control_stores: 4
+  minutes_per_store: 30.0
+  rounding: ceiling
+  note: >
+    34 treated stores at four to a manager is nine managers; four calls at
+    half an hour each is the two hours each of them spends. Both figures
+    are computed from the case's own store count — moving a scenario to a
+    different number of stores moves them.
+
+# ---------------------------------------------------------------------------
+# 5. RECOVERY. Attributable money, times the curve, over a horizon.
+#
+# The label on the band is a function of how many prior comparable cases
+# the curve was fitted on, NOT a judgement. Three cases is Medium however
+# tight the quartiles look, because a tight band on three observations is
+# not evidence of precision.
+# ---------------------------------------------------------------------------
+recovery:
+  curve_from: playbook.recovery_curve_ref
+  attributable_from: leading_hypothesis_attribution
+
+  # Evaluated top down; the first row whose `min_cases` is met wins.
+  # Cross-checked at load against every curve's declared label, so the two
+  # can never drift apart.
+  confidence_by_sample_size:
+    - { min_cases: 8, label: High }
+    - { min_cases: 3, label: Medium }
+    - { min_cases: 0, label: Low }
+
+  # An information lever recovers nothing by construction. Quoting an ROI
+  # for one would double-count the recovery a later, properly-evidenced
+  # action delivers.
+  suppress_roi_for_information_levers: true
+
+# ---------------------------------------------------------------------------
+# 6. RESOLUTION. What an abstained case outputs instead of an action.
+#
+# Ranked by value per rupee: what the investigation could unlock, over
+# what it costs. Both halves are computed.
+#
+#   value = residual at stake x the causal graph's prior for the driver
+#           the investigation would make testable
+#   cost  = the playbook's cost model against this case's quantities
+#
+# The prior is the graph's, not a fresh guess: an investigation into a
+# driver the organisation rarely finds guilty is worth less than the same
+# spend on a common one, and the graph already says which is which.
+# ---------------------------------------------------------------------------
+resolution:
+  rank_by: value_per_rupee
+  value_model: residual_times_prior
+  min_entries: 1
+
+  # Something must be advised against. A resolution panel that only lists
+  # things to buy reads as a shopping list. Naming the lever a reasonable
+  # person would reach for first, and refusing it out loud with its price
+  # and its error rate, is what makes the rest of the panel credible.
+  not_recommended:
+    required: true
+
+    # Where the chance of being wrong comes from. Both are computed; the
+    # WORSE of the two is quoted, because reaching for the flattering one
+    # on a case that just abstained would be exactly the wrong instinct.
+    error_rate_sources:
+      indistinguishable_tie: >
+        Trigger T4 found k hypotheses the available data cannot separate.
+        Acting on one of them is a (k-1)/k chance of acting on the wrong
+        one — a straight coin flip at k=2.
+      case_type_calibration: >
+        One minus the organisation's historical accuracy on this case
+        type. What our own track record says.
+    error_rate_rule: worst_of
+
+    # A lever is refused when it carries preconditions this case cannot
+    # meet. price_correction's four preconditions are the worked example.
+    refuse_when: preconditions_unmet
+
+# ---------------------------------------------------------------------------
+# 7. LINKED CASES — the cause of the cause.
+#
+# Expedited freight fixes eight weeks of empty shelves. It does not fix
+# the allocation rule that emptied them, and that rule will do it again
+# next cycle. When a playbook declares a `linked_case_template`, closing
+# the parent OPENS the child, so the second case exists whether or not
+# anybody remembers to raise it.
+# ---------------------------------------------------------------------------
+linked_case:
+  enabled: true
+  id_strategy: max_numeric_plus_one
+  status: open
+
+  # Which KPI the child is opened against: the first KPI the linked driver
+  # affects that can actually carry a case. `transport_disruption` affects
+  # on_shelf_availability first, which is the right place to argue about a
+  # distribution centre.
+  kpi_from: linked_driver_affects_first
+
+  # A playbook's `linked_case_template.scope_hint` resolves through here.
+  # `{scope}` is the originating case's scope.
+  scope_hints:
+    same_as_originating_case: "{scope}"
+    distribution_centre: "{scope} DC"
+
+# ---------------------------------------------------------------------------
+# 8. DATA GAP REGISTER. T3 says the leading hypothesis needs a source the
+# organisation does not hold. That is a standing fact about the business,
+# not an incident, and it belongs in the register beside the four
+# reconciliation gaps rather than only in one case's UI.
+#
+# The resolution hint is the playbook that acquires the source, priced.
+# Somebody reading the register a quarter from now gets the fix, not just
+# the complaint.
+# ---------------------------------------------------------------------------
+data_gap:
+  trigger: T3
+  gap_code: SOURCE_NOT_HELD
+  severity: ERROR
+  measure: source_held
+  unit: boolean
+  value_when_missing: 0.0
+  detail_template: >
+    {hypothesis} cannot be tested: {source} is not held by the
+    organisation. Case {case_id} abstained on {trigger}.
+  resolution_hint_from: acquisition_playbook
+
+  # And ONLY a playbook carrying this lever counts as one. A call-down is
+  # cheaper than anything else on the page and it resolves nothing here:
+  # it does not put a competitor price feed in the warehouse. A hint that
+  # cannot close the gap reads as solved, which is worse than no hint.
+  acquisition_lever: acquire_missing_source
+
+  no_playbook_hint: >
+    No playbook acquires this source. It has to be scoped before it can be
+    priced.

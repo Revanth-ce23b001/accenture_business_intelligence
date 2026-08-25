@@ -342,7 +342,11 @@ CREATE TABLE IF NOT EXISTS case_registry (
     confidence_calibrated  DOUBLE,
     triggers_fired         VARCHAR,
     elapsed_ms             DOUBLE,
-    closed_at              TIMESTAMP
+    closed_at              TIMESTAMP,
+    -- The case this one was opened FROM, when a playbook's
+    -- `linked_case_template` raised it: the cause of the cause. Written by
+    -- engine/recommend/linked.py. NULL for a case a movement opened.
+    linked_from_case_id    VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS case_hypothesis (

@@ -25,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -162,6 +163,33 @@ class GrainSpec(_Node):
         return self
 
 
+class DriverOwner(_Node):
+    """Who answers for a movement this driver caused."""
+
+    role: str = Field(min_length=1, description="Stable key; what the audit trail stores")
+    title: str = Field(min_length=1, description="How the role renders in the UI")
+
+
+class DriverOwnership(_Node):
+    """Ownership by CAUSAL driver, which is not ownership by KPI.
+
+    `KpiContract.drivers` decomposes the KPI — WHERE the movement sits.
+    This maps the causal graph's drivers — WHY it moved — onto the person
+    who can act. CLAUDE.md rule 7 keeps those two apart everywhere else;
+    it has to keep them apart here too, or the recommendation is addressed
+    to whoever owns the metric rather than whoever owns the cause.
+    """
+
+    default: DriverOwner
+    by_driver: dict[str, DriverOwner] = Field(default_factory=dict)
+
+    def owner(self, driver: str | None) -> DriverOwner:
+        """The named owner for this driver, or the KPI's own owner."""
+        if driver is None:
+            return self.default
+        return self.by_driver.get(driver, self.default)
+
+
 class KpiContract(_Node):
     kpi: str
     version: int = Field(ge=1)
@@ -183,6 +211,9 @@ class KpiContract(_Node):
     history_weeks: int = Field(ge=0)
 
     drivers: list[str] = Field(default_factory=list)
+    #: None means the KPI has not been asked the question yet, and every
+    #: driver falls back to `owner_role`. Absent rather than guessed.
+    driver_ownership: DriverOwnership | None = None
     related_kpis: list[str] = Field(default_factory=list)
     lineage_stages: list[LineageStage] = Field(min_length=1)
     access_policy: AccessPolicy
@@ -191,6 +222,19 @@ class KpiContract(_Node):
     def has_sufficient_history(self) -> bool:
         """False means this KPI stops at the history gate."""
         return self.history_weeks >= self.baseline.min_history_weeks
+
+    def owner_for(self, driver: str | None) -> tuple[str, str]:
+        """(role, title) for an adjudicated driver. Never hardcoded in Python.
+
+        Falls back through the contract's own default and then to
+        `owner_role`, whose title is the role key when nobody has written
+        one down — visibly ugly, which is the point. A missing title is a
+        contract that has not been finished, not something to invent.
+        """
+        if self.driver_ownership is None:
+            return self.owner_role, self.owner_role
+        owner = self.driver_ownership.owner(driver)
+        return owner.role, owner.title
 
     def can_open_a_case(self) -> bool:
         """A KPI with no materiality limit and no baseline is monitoring only."""
@@ -596,6 +640,9 @@ class Units(_Node):
     days_per_week: int = Field(gt=0)
     days_per_year: float = Field(gt=0.0)
     seconds_per_hour: float = Field(gt=0.0)
+    minutes_per_hour: float = Field(gt=0.0)
+    hours_per_day: float = Field(gt=0.0)
+    months_per_year: int = Field(gt=0)
 
 
 class Governance(_Node):
@@ -1099,6 +1146,10 @@ class LongTailSource(_Node):
     max_candidates: int = Field(ge=0)
     prior: float = Field(gt=0.0, lt=1.0)
     tag_prefix: str = Field(min_length=1)
+    #: Token overlap above which a proposed candidate is treated as a
+    #: restatement of a graph hypothesis rather than a new one.
+    novelty_overlap_threshold: float = Field(gt=0.0, le=1.0)
+    novelty_stopwords: list[str] = Field(default_factory=list)
 
 
 class HypothesisSources(_Node):
@@ -1484,6 +1535,264 @@ class AdjudicateConfig(_Node):
 
 
 # ---------------------------------------------------------------------------
+# RECOMMEND
+# ---------------------------------------------------------------------------
+
+
+class MatchingSpec(_Node):
+    match_on: Literal["adjudicated_driver"]
+    information_levers: list[str] = Field(min_length=1)
+    prefer_recovering_lever: bool
+    tie_break: Literal["shortest_lead_time"]
+    no_playbook_outcome: str = Field(min_length=1)
+
+
+class CostTypeSpec(_Node):
+    arithmetic: Literal["rate_times_basis", "depth_times_basis"]
+    description: str = Field(min_length=1)
+
+
+class UnobservedDepthSpec(_Node):
+    """What a depth-priced lever risks when its depth cannot be observed."""
+
+    basis: str = Field(min_length=1)
+    multiplier: Literal["gross_margin_rate"]
+    note: str | None = None
+
+
+class CostSpec(_Node):
+    bases: dict[str, str] = Field(min_length=1)
+    types: dict[str, CostTypeSpec] = Field(min_length=1)
+    depth_sources: dict[str, str] = Field(min_length=1)
+    unobserved_depth: UnobservedDepthSpec
+    display_unit: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unobserved_depth_names_a_basis(self) -> CostSpec:
+        if self.unobserved_depth.basis not in self.bases:
+            raise ValueError(
+                f"unobserved_depth.basis {self.unobserved_depth.basis!r} is not one of "
+                f"the declared cost bases ({sorted(self.bases)})"
+            )
+        return self
+
+
+class EconomicsSpec(_Node):
+    gross_margin_rate: float = Field(gt=0.0, lt=1.0)
+    gross_margin_basis: str = Field(min_length=1)
+    manager_hour_inr: float = Field(gt=0.0)
+    manager_hour_basis: str | None = None
+
+
+class CallDownSpec(_Node):
+    playbook: str = Field(min_length=1)
+    span_of_control_stores: int = Field(gt=0)
+    minutes_per_store: float = Field(gt=0.0)
+    rounding: Literal["ceiling"]
+    note: str | None = None
+
+
+class RecoveryConfidenceBand(_Node):
+    min_cases: int = Field(ge=0)
+    label: Literal["Low", "Medium", "High"]
+
+
+class RecoverySpec(_Node):
+    curve_from: Literal["playbook.recovery_curve_ref"]
+    attributable_from: Literal["leading_hypothesis_attribution"]
+    confidence_by_sample_size: list[RecoveryConfidenceBand] = Field(min_length=1)
+    suppress_roi_for_information_levers: bool
+
+    @model_validator(mode="after")
+    def _bands_descend_and_reach_zero(self) -> RecoverySpec:
+        """Top down, and the last one must catch everything.
+
+        A table whose lowest band starts above zero has a sample size it
+        cannot label, and the engine would have to invent one.
+        """
+        thresholds = [band.min_cases for band in self.confidence_by_sample_size]
+        if thresholds != sorted(thresholds, reverse=True):
+            raise ValueError(
+                f"confidence_by_sample_size must descend by min_cases, got {thresholds}"
+            )
+        if thresholds[-1] != 0:
+            raise ValueError(
+                "the last confidence band must start at min_cases: 0, or a curve fitted "
+                "on no cases has no label"
+            )
+        return self
+
+    def label_for(self, sample_size: int) -> str:
+        for band in self.confidence_by_sample_size:
+            if sample_size >= band.min_cases:
+                return band.label
+        raise ValueError(f"no confidence band covers sample size {sample_size}")
+
+
+class NotRecommendedSpec(_Node):
+    required: bool
+    error_rate_sources: dict[str, str] = Field(min_length=1)
+    error_rate_rule: Literal["worst_of"]
+    refuse_when: Literal["preconditions_unmet"]
+
+
+class ResolutionSpec(_Node):
+    rank_by: Literal["value_per_rupee"]
+    value_model: Literal["residual_times_prior"]
+    min_entries: int = Field(ge=1)
+    not_recommended: NotRecommendedSpec
+
+
+class LinkedCaseSpec(_Node):
+    enabled: bool
+    id_strategy: Literal["max_numeric_plus_one"]
+    status: str = Field(min_length=1)
+    kpi_from: Literal["linked_driver_affects_first"]
+    scope_hints: dict[str, str] = Field(min_length=1)
+
+    def scope_for(self, hint: str, scope: str) -> str:
+        template = self.scope_hints.get(hint)
+        if template is None:
+            raise ValueError(
+                f"scope hint {hint!r} has no resolution in recommend.yaml -> "
+                f"linked_case.scope_hints ({sorted(self.scope_hints)})"
+            )
+        return template.format(scope=scope)
+
+
+class DataGapSpec(_Node):
+    trigger: str = Field(min_length=1)
+    gap_code: str = Field(min_length=1)
+    severity: str = Field(min_length=1)
+    measure: str = Field(min_length=1)
+    unit: str = Field(min_length=1)
+    value_when_missing: float
+    detail_template: str = Field(min_length=1)
+    resolution_hint_from: Literal["acquisition_playbook"]
+    acquisition_lever: str = Field(min_length=1)
+    no_playbook_hint: str = Field(min_length=1)
+
+
+class RecommendConfig(_Node):
+    version: int = Field(ge=1)
+    matching: MatchingSpec
+    cost: CostSpec
+    economics: EconomicsSpec
+    call_down: CallDownSpec
+    recovery: RecoverySpec
+    resolution: ResolutionSpec
+    linked_case: LinkedCaseSpec
+    data_gap: DataGapSpec
+
+
+# ---------------------------------------------------------------------------
+# NARRATE
+# ---------------------------------------------------------------------------
+
+
+class PersonaNarrative(_Node):
+    """One reader, and what they are told first."""
+
+    display_name: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+    leads_with: str = Field(min_length=1)
+    max_sentences: int = Field(gt=0)
+    #: `narrate.yaml` says `voice`, not `register`: a field named
+    #: `register` shadows a BaseModel method and pydantic warns. Same
+    #: reason `validate.yaml` loads as `validation`.
+    voice: str = Field(min_length=1)
+    must_cover: list[str] = Field(min_length=1)
+    omit: list[str] = Field(default_factory=list)
+
+
+class NumericGrounding(_Node):
+    """How a number written in prose is matched to the frozen object."""
+
+    match: Literal["round_to_token_precision"]
+    tolerance_relative: float = Field(ge=0.0, lt=1.0)
+    percent_expansion: bool
+    ignore_patterns: dict[str, str] = Field(min_length=1)
+    allow_small_integers_up_to: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _ignore_patterns_compile(self) -> NumericGrounding:
+        for name, pattern in self.ignore_patterns.items():
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"ignore pattern {name!r} does not compile: {exc}") from exc
+        return self
+
+
+class GroundingSpec(_Node):
+    min_evidence_ids_per_sentence: int = Field(ge=1)
+    max_regenerations: int = Field(ge=0)
+    hard_gate_tests: list[str] = Field(min_length=1)
+    numeric: NumericGrounding
+
+
+class BareCausalClaim(_Node):
+    pattern: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _pattern_compiles(self) -> BareCausalClaim:
+        try:
+            re.compile(self.pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"bare causal pattern does not compile: {exc}") from exc
+        return self
+
+
+class ForbiddenPhrase(_Node):
+    """A phrase banned outright, with what to write instead and why.
+
+    `instead` is not decoration. It is quoted back to the model on the one
+    regeneration it gets, and a rule with no replacement produces a second
+    attempt that is merely shorter.
+    """
+
+    phrase: str = Field(min_length=1)
+    instead: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+
+
+class LanguageSpec(_Node):
+    causal_connectives: list[str] = Field(min_length=1)
+    required_attribution_form: str = Field(min_length=1)
+    bare_causal_claims: list[BareCausalClaim] = Field(min_length=1)
+    forbidden_phrases: list[ForbiddenPhrase] = Field(min_length=1)
+    house_style: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _phrases_are_lowercase(self) -> LanguageSpec:
+        """Matching is case-insensitive; the config must not pretend otherwise.
+
+        A rule written "Root Cause" would read as though case mattered,
+        and the next person to add one would copy the capitalisation and
+        assume it does.
+        """
+        for entry in self.forbidden_phrases:
+            if entry.phrase != entry.phrase.lower():
+                raise ValueError(
+                    f"forbidden phrase {entry.phrase!r} is not lowercase; matching is "
+                    "case-insensitive and the config should say so"
+                )
+        for connective in self.causal_connectives:
+            if connective != connective.lower():
+                raise ValueError(f"causal connective {connective!r} is not lowercase")
+        return self
+
+
+class NarrateConfig(_Node):
+    version: int = Field(ge=1)
+    prompt_version: int = Field(ge=1)
+    personas: dict[str, PersonaNarrative] = Field(min_length=1)
+    grounding: GroundingSpec
+    language: LanguageSpec
+
+
+# ---------------------------------------------------------------------------
 # The whole layer
 # ---------------------------------------------------------------------------
 
@@ -1501,6 +1810,8 @@ class SemanticLayer(_Node):
     qualify: QualifyConfig
     gather: GatherConfig
     adjudicate: AdjudicateConfig
+    recommend: RecommendConfig
+    narrate: NarrateConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -1680,6 +1991,152 @@ class SemanticLayer(_Node):
                     "causal graph's source registry does not declare"
                 )
 
+        # --- RECOMMEND ----------------------------------------------------
+        recommend = self.recommend
+        for name, kpi in self.kpis.items():
+            ownership = kpi.driver_ownership
+            if ownership is None:
+                continue
+            if ownership.default.role != kpi.owner_role:
+                raise ValueError(
+                    f"kpi {name!r} names owner_role {kpi.owner_role!r} but its "
+                    f"driver_ownership default is {ownership.default.role!r}; the KPI's "
+                    "own owner is who a driver with no named owner falls back to"
+                )
+            for driver in ownership.by_driver:
+                if driver not in hypothesis_names:
+                    raise ValueError(
+                        f"kpi {name!r} assigns ownership of {driver!r}, which is not a "
+                        "hypothesis in the causal graph"
+                    )
+                # A driver that cannot move this KPI has no owner OF this
+                # KPI. Naming one is dead config that reads as a decision
+                # somebody made: no recommendation can ever reach the row,
+                # because a case is only opened on a movement the driver
+                # could have caused.
+                if name not in self.causal_graph.hypotheses[driver].affects:
+                    raise ValueError(
+                        f"kpi {name!r} assigns an owner for {driver!r}, which does not "
+                        f"affect it (it affects "
+                        f"{self.causal_graph.hypotheses[driver].affects}); no case on "
+                        "this KPI could ever reach that row"
+                    )
+
+        # One role, one title, everywhere. Two contracts calling the same
+        # role by different names would put two different people on the
+        # screen for one job.
+        titles: dict[str, tuple[str, str]] = {}
+        for name, kpi in self.kpis.items():
+            if kpi.driver_ownership is None:
+                continue
+            owners = [kpi.driver_ownership.default, *kpi.driver_ownership.by_driver.values()]
+            for owner in owners:
+                seen = titles.setdefault(owner.role, (owner.title, name))
+                if seen[0] != owner.title:
+                    raise ValueError(
+                        f"role {owner.role!r} is titled {seen[0]!r} in {seen[1]} and "
+                        f"{owner.title!r} in {name}"
+                    )
+
+        for name, playbook in self.playbooks.items():
+            model = playbook.cost_model
+            if model.type not in recommend.cost.types:
+                raise ValueError(
+                    f"playbook {name!r} uses cost model type {model.type!r}, which "
+                    f"recommend.yaml does not declare ({sorted(recommend.cost.types)})"
+                )
+            if model.scales_with not in recommend.cost.bases:
+                raise ValueError(
+                    f"playbook {name!r} scales with {model.scales_with!r}, which is not "
+                    f"a cost basis in recommend.yaml ({sorted(recommend.cost.bases)})"
+                )
+            arithmetic = recommend.cost.types[model.type].arithmetic
+            if arithmetic == "depth_times_basis" and model.depth_source is None:
+                raise ValueError(
+                    f"playbook {name!r} is priced on a depth but names no depth_source"
+                )
+            if model.depth_source is not None and (
+                model.depth_source not in recommend.cost.depth_sources
+            ):
+                raise ValueError(
+                    f"playbook {name!r} takes its depth from {model.depth_source!r}, "
+                    f"which recommend.yaml does not declare "
+                    f"({sorted(recommend.cost.depth_sources)})"
+                )
+            if playbook.linked_case_template is not None:
+                hint = playbook.linked_case_template.scope_hint
+                if hint not in recommend.linked_case.scope_hints:
+                    raise ValueError(
+                        f"playbook {name!r} links a case with scope hint {hint!r}, which "
+                        f"recommend.yaml cannot resolve "
+                        f"({sorted(recommend.linked_case.scope_hints)})"
+                    )
+
+        if recommend.call_down.playbook not in self.playbooks:
+            raise ValueError(
+                f"recommend.yaml names call-down playbook "
+                f"{recommend.call_down.playbook!r}, which does not exist"
+            )
+        acquiring = {
+            playbook.lever
+            for playbook in self.playbooks.values()
+        }
+        if recommend.data_gap.acquisition_lever not in acquiring:
+            raise ValueError(
+                f"recommend.yaml resolves data gaps with lever "
+                f"{recommend.data_gap.acquisition_lever!r}, which no playbook carries "
+                f"({sorted(acquiring)}); every gap would come back unresolvable"
+            )
+        if recommend.data_gap.acquisition_lever not in recommend.matching.information_levers:
+            raise ValueError(
+                f"lever {recommend.data_gap.acquisition_lever!r} resolves data gaps but "
+                "is not an information lever; a lever that recovers revenue is an "
+                "action, not a way to close a source gap"
+            )
+        if recommend.data_gap.trigger not in self.adjudication.triggers:
+            raise ValueError(
+                f"recommend.yaml writes a data gap on trigger "
+                f"{recommend.data_gap.trigger!r}, which is not a declared trigger"
+            )
+
+        # A curve carries a label AND a sample size, and the sample size is
+        # what the label is supposed to mean. Checked here so the two can
+        # never drift: an edit to one without the other fails to load.
+        for curve_name, curve in self.recovery_curves.curves.items():
+            expected = recommend.recovery.label_for(curve.sample_size)
+            if curve.confidence_label != expected:
+                raise ValueError(
+                    f"recovery curve {curve_name!r} is fitted on {curve.sample_size} "
+                    f"cases, which recommend.yaml labels {expected!r}, but the curve "
+                    f"declares {curve.confidence_label!r}"
+                )
+
+        # --- NARRATE ------------------------------------------------------
+        narrate = self.narrate
+        for persona in narrate.personas:
+            missing_from = sorted(
+                name
+                for name, kpi in self.kpis.items()
+                if persona not in kpi.access_policy.personas
+            )
+            if missing_from:
+                raise ValueError(
+                    f"narrate.yaml writes for persona {persona!r}, which "
+                    f"{missing_from} do not grant access to; the narrative would be "
+                    "written for a reader the row filter refuses to serve"
+                )
+
+        declared_gates = sorted(
+            name for name, spec in self.adjudication.tests.items() if spec.type == "hard_gate"
+        )
+        if sorted(narrate.grounding.hard_gate_tests) != declared_gates:
+            raise ValueError(
+                f"narrate.yaml gates causal language on "
+                f"{sorted(narrate.grounding.hard_gate_tests)}, but adjudication.yaml "
+                f"declares the hard gates as {declared_gates}. A connective would be "
+                "allowed on a hypothesis that never passed one."
+            )
+
         conflict = self.warehouse.reconciliation.definition_conflict
         if conflict.kpi not in kpi_names:
             raise ValueError(
@@ -1780,6 +2237,8 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     qualify_path = base / "qualify.yaml"
     gather_path = base / "gather.yaml"
     adjudicate_path = base / "adjudicate.yaml"
+    recommend_path = base / "recommend.yaml"
+    narrate_path = base / "narrate.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -1796,6 +2255,8 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
         "adjudicate": _build(
             AdjudicateConfig, _read_yaml(adjudicate_path), adjudicate_path
         ),
+        "recommend": _build(RecommendConfig, _read_yaml(recommend_path), recommend_path),
+        "narrate": _build(NarrateConfig, _read_yaml(narrate_path), narrate_path),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -1817,64 +2278,85 @@ def load_timed(root: Path | str | None = None) -> tuple[SemanticLayer, float]:
 
 
 __all__ = [
-    "MANDATORY_PLAYBOOK_FIELDS",
     "AccessPolicy",
     "AdjudicateConfig",
     "AdjudicationConfig",
     "AttributionSpec",
-    "ConfounderMeasure",
-    "ConfounderScreenSpec",
-    "DidSpec",
-    "DoseResponseSpec",
-    "EliminationSpec",
-    "MatchingSpec",
-    "PrecedenceSpec",
-    "Series",
-    "SpecificitySpec",
-    "SufficiencySpec",
+    "BandGate",
+    "BareCausalClaim",
     "Baseline",
+    "CalendarGate",
     "CalendarMismatch",
+    "CallDownSpec",
     "CausalGraph",
     "ClassificationSpec",
+    "ConfounderMeasure",
+    "ConfounderScreenSpec",
     "Corpus",
     "CostModel",
-    "GatherConfig",
+    "CostSpec",
+    "CostTypeSpec",
+    "DataGapSpec",
     "DefinitionConflict",
+    "DefinitionDriftCheck",
+    "DidSpec",
+    "DoseResponseSpec",
+    "DriverOwner",
+    "DriverOwnership",
+    "EconomicsSpec",
+    "EliminationSpec",
     "EntityKeyMismatch",
     "EvidenceVocabulary",
+    "ExitCode",
+    "ForbiddenPhrase",
+    "GatherConfig",
+    "get_semantic_layer",
     "Governance",
     "GrainMismatch",
+    "GroundingSpec",
     "HypothesisTemplate",
     "KpiContract",
+    "LanguageSpec",
+    "LinkedCaseSpec",
+    "load_semantic_layer",
+    "load_timed",
+    "MANDATORY_PLAYBOOK_FIELDS",
+    "MatchingSpec",
     "Materiality",
-    "BandGate",
-    "CalendarGate",
     "MaterialityGate",
+    "NarrateConfig",
+    "NotRecommendedSpec",
+    "NumericGrounding",
+    "PersonaNarrative",
     "Playbook",
+    "PrecedenceSpec",
     "QualifyConfig",
+    "RecommendConfig",
     "Reconciliation",
-    "RestraintSpec",
-    "RetrievalSpec",
-    "SpecificityGate",
-    "StructuredTemplate",
-    "Severity",
+    "RecoveryConfidenceBand",
     "RecoveryCurve",
     "RecoveryCurves",
-    "RevenueDefinition",
-    "DefinitionDriftCheck",
-    "ExitCode",
+    "RecoverySpec",
+    "ResolutionSpec",
     "RestatementCheck",
+    "RestraintSpec",
+    "RetrievalSpec",
+    "RevenueDefinition",
     "RowCountDeltaCheck",
     "SemanticLayer",
     "SemanticLayerError",
+    "Series",
+    "Severity",
     "SingleTransactionCheck",
     "SourceFreshnessCheck",
     "SourceLocation",
+    "SpecificityGate",
+    "SpecificitySpec",
+    "StructuredTemplate",
+    "SufficiencySpec",
     "Units",
+    "UnobservedDepthSpec",
     "ValidateChecks",
     "ValidateConfig",
     "WarehouseConfig",
-    "get_semantic_layer",
-    "load_semantic_layer",
-    "load_timed",
 ]

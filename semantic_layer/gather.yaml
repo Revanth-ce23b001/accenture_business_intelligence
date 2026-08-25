@@ -64,6 +64,28 @@ hypotheses:
       # mistaken for one the business declared.
       tag_prefix: "lt_"
 
+      # NOVELTY. A candidate the graph does not contain enters flagged
+      # `novel: true`; a candidate that is a graph hypothesis in different
+      # words is REJECTED rather than admitted under a new tag.
+      #
+      # The check is a token overlap against every graph label, because a
+      # model asked not to repeat will not repeat the wording — it will
+      # repeat the idea. "Shelf availability collapse" against the graph's
+      # "Stock-out on ranged SKUs" shares no words at all and is caught by
+      # its description; "Stock-out on ranged lines" shares three of four
+      # and is caught here. Below this share it is treated as genuinely
+      # new, at the long-tail prior, and screened like everything else.
+      novelty_overlap_threshold: 0.6
+
+      # Words that carry no meaning for the comparison. Without this,
+      # "a decline in store footfall" and "a decline in store staffing"
+      # look more alike than they are.
+      # Quoted, every one of them. Unquoted `on` is boolean true in YAML
+      # 1.1 and the loader would reject the list — which it did, the first
+      # time this was written.
+      novelty_stopwords:
+        ["a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"]
+
   # Applicability multiplies the prior. Note what is NOT here: a penalty
   # for missing sources. A hypothesis the organisation cannot test is not
   # thereby less likely to be true — it is less likely to be PROVEN, which

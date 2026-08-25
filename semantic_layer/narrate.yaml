@@ -1,0 +1,272 @@
+# NARRATE — the only stage where a model writes something a person reads,
+# and the rules that make that safe.
+#
+# The model receives a FROZEN adjudication object and may render it. It may
+# not alter it, extend it, or reach past it (CLAUDE.md rule 1). Everything
+# in this file exists to make that a checkable property rather than a
+# promise in a prompt:
+#
+#   - it must attach an evidence id to every sentence it writes, so a
+#     reader can click the sentence and see the number behind it;
+#   - every number it types is checked against the object it was given,
+#     with a rounding tolerance and nothing else;
+#   - it may only assert cause for a hypothesis that passed BOTH hard
+#     gates, and the check is a deterministic match on the test results,
+#     not a judgement about the sentence;
+#   - and three house phrasings are banned outright, because each of them
+#     is a way of sounding certain without being accountable.
+#
+# A sentence that breaks any of these is STRIPPED. One regeneration is
+# offered, naming exactly what failed. What comes back is checked the same
+# way, and anything still failing is DROPPED. The narrative gets shorter;
+# it never gets a caveat bolted onto a claim that could not be supported.
+
+version: 1
+prompt_version: 1
+
+# ---------------------------------------------------------------------------
+# 1. PERSONAS. The same adjudication, told to three different people.
+#
+# Not three tones of voice over one script. The three differ in what they
+# LEAD WITH, because the first sentence is the only one some of them will
+# read, and the three have different first questions:
+#
+#   a CXO asks           how much, and what are we doing about it
+#   a regional manager   which of my stores, and what do I do on Monday
+#   an analyst           how do you know, and what would change your mind
+#
+# Every persona here must also exist in the KPI contracts' access policy.
+# Narrating to somebody the row filter has never heard of would be writing
+# for a reader the warehouse would refuse to serve.
+# ---------------------------------------------------------------------------
+personas:
+
+  cxo:
+    display_name: Chief Executive
+    audience: >
+      Reads the first sentence and the number. Wants the size of the
+      problem, how sure we are, and what it costs to act.
+    leads_with: verdict
+    max_sentences: 4
+    voice: >
+      Plain and short. No method names, no statistics vocabulary, no
+      hedging adverbs. Money in crore, movements in points.
+    must_cover: [verdict, residual_money, confidence, action]
+    omit: [test_statistics, matching_covariates, evidence_tiers]
+
+  regional_manager:
+    display_name: Regional Manager
+    audience: >
+      Owns the stores in scope. Wants to know which of them, what happened
+      in them, and what is being asked of them this week.
+    leads_with: affected_stores
+    max_sentences: 6
+    voice: >
+      Operational and concrete. Name store counts and the treated group.
+      Say what the action requires of the stores, not what it costs head
+      office.
+    must_cover: [affected_stores, mechanism, action, monitoring]
+    omit: [test_statistics, calibration]
+
+  analyst:
+    display_name: Analyst
+    audience: >
+      Will check the working. Wants the method, the test outcomes, what
+      was eliminated and why, and what is still unexplained.
+    leads_with: method
+    max_sentences: 10
+    voice: >
+      Technical and complete. Name the test, the estimate and the p-value.
+      Say which hypotheses were eliminated and on which gate. State the
+      unattributed residual rather than rounding it away.
+    must_cover:
+      [method, test_outcomes, eliminated_hypotheses, unattributed_residual, confidence]
+    omit: []
+
+# ---------------------------------------------------------------------------
+# 2. GROUNDING. The deterministic check that runs after every generation.
+#
+# None of it asks the model anything. Each rule is a match against the
+# frozen object or against a fixed list, which is the whole reason a
+# grounding claim can be printed on the screen: `grounding: 14/14 claims
+# linked · 0 stripped` is a measurement, not a reassurance.
+# ---------------------------------------------------------------------------
+grounding:
+  min_evidence_ids_per_sentence: 1
+
+  # One. A model that could not ground a sentence when told precisely what
+  # was wrong with it will not do better on the third attempt; it will
+  # write something vaguer that happens to pass. Shorter and true beats
+  # longer and unfalsifiable.
+  max_regenerations: 1
+
+  # The two tests CLAUDE.md calls HARD GATES. Cross-checked at load
+  # against adjudication.yaml, so this list cannot drift from the tests
+  # that actually carry `type: hard_gate`.
+  hard_gate_tests: [precedence, sufficiency]
+
+  numeric:
+    # The rule is ROUNDING, not proximity: a token matches when some
+    # stored value rounds to it AT THE TOKEN'S OWN PRECISION. Writing
+    # "1.88" claims two decimal places and accepts a stored value in
+    # [1.875, 1.885). Writing "1.9" claims one and accepts [1.85, 1.95).
+    # Writing "2" claims none and accepts [1.5, 2.5).
+    #
+    # Fewer decimals is therefore a WIDER window, and that is what
+    # rounding means — "about 2 crore" is a true thing to say about 1.88.
+    # What the rule refuses is a figure no stored value rounds to at the
+    # precision it was written to: 1.87, 9.99, 41.7.
+    #
+    # KNOWN LIMIT, stated rather than papered over. The whitelist is the
+    # whole object, so a number is checked for PROVENANCE and not for
+    # relevance: a sentence quoting 88.8 grounds because the raw
+    # confidence is 0.8876 and 88.76 rounds to 88.8, even if the sentence
+    # was talking about revenue. Catching that needs the number tied to
+    # the field it came from, which the model would have to declare and
+    # could therefore misdeclare. This check stops figures being invented;
+    # it does not stop them being misapplied, and the evidence id on every
+    # sentence is what a reader uses to catch the rest.
+    match: round_to_token_precision
+
+    # Belt and braces for a stored value carrying float noise, e.g.
+    # 3.1104000000000003 against a written 3.11.
+    tolerance_relative: 0.0005
+
+    # The object stores shares as ratios (0.79) and the prose says 79%.
+    # Both forms are admitted, and ONLY these two — a token is never
+    # matched by scaling it around until something fits.
+    percent_expansion: true
+
+    # Never numeric tokens: they are identifiers and dates, not
+    # quantities, and treating them as quantities would let "2025" ground
+    # itself against any stored value near it.
+    ignore_patterns:
+      iso_date: '\d{4}-\d{2}-\d{2}'
+      iso_month: '\d{4}-\d{2}'
+      evidence_id: '[a-z_]+\.[a-z_0-9]+'
+      case_reference: '#\d+'
+      trigger_id: '\bT[1-8]\b'
+      test_reference: '\bTest\s+[1-6]\b'
+
+      # A date as a person writes it. `iso_date` above only catches the
+      # stored form; prose says "12 Nov" and "November 12", and a day of
+      # the month is not a quantity looking for something to ground
+      # against.
+      written_date: '\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b'
+      written_date_reversed: '\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b'
+
+      # A hyphenated name that happens to contain digits. "Top-20" is the
+      # name of a SKU set, defined in dim_sku — not minus twenty, and not
+      # a claim about this case.
+      named_set: '\b[A-Za-z]+-\d+(?:\.\d+)?\b'
+
+    # An ordinal or a small count the object does not carry — "the two
+    # hard gates", "all six tests" — is not a claim about the business.
+    # Written as words in the prompt; allowed as digits only up to this,
+    # because a fabricated figure is never 3.
+    allow_small_integers_up_to: 6
+
+# ---------------------------------------------------------------------------
+# 3. LANGUAGE. Three families, and they are not the same rule.
+#
+# CAUSAL CONNECTIVES are conditional. "Because" is a legitimate word about
+# a hypothesis that passed temporal precedence AND effect-size
+# sufficiency, and a lie about one that did not. The check is on the test
+# results, so the same sentence is allowed on #2451's H1 and stripped on
+# its H4.
+#
+# BARE CAUSAL CLAIMS are unconditional. "Revenue fell because of the
+# stock-out" is banned even where the hypothesis passed everything,
+# because it asserts the whole movement. The hypothesis explains a SHARE,
+# the share is known, and a sentence that omits it is claiming more than
+# the adjudication says.
+#
+# FORBIDDEN PHRASES are unconditional and are about accountability.
+# "Root cause" claims a terminus the method cannot reach — every cause in
+# this system has a cause above it, which is what linked cases are for.
+# "AI analysis shows" hides the method behind the tool; a reader cannot
+# argue with it, which is precisely why it is attractive and precisely why
+# it is banned.
+# ---------------------------------------------------------------------------
+language:
+
+  causal_connectives:
+    - because
+    - because of
+    - caused by
+    - due to
+    - led to
+    - leading to
+    - resulted in
+    - resulting in
+    - the result of
+    - on account of
+
+  # The phrasing every attribution has to take instead. Shown to the model
+  # in the prompt and quoted back to it on a regeneration.
+  required_attribution_form: >
+    {hypothesis} is the best-supported explanation for {share} of the
+    {kpi} decline
+
+  bare_causal_claims:
+    - pattern: '\b(fell|dropped|declined|rose|increased|grew)\b[^.]{0,40}?\b(because|due to|caused by)\b'
+      why: >
+        Asserts the whole movement. The hypothesis accounts for a share,
+        the share is in the object, and a sentence that leaves it out
+        claims more than the adjudication does.
+    - pattern: '\bwas caused by\b'
+      why: Same claim in the passive. A share is still a share.
+    - pattern: '\bthe reason (for|why)\b'
+      why: >
+        "The" reason. Singular and definite, on a case whose whole output
+        is a set of competing explanations with shares.
+
+  forbidden_phrases:
+    - phrase: root cause
+      instead: primary attributed driver
+      why: >
+        Claims a terminus. Every cause here has a cause above it —
+        expedited freight fixes the shelf, not the allocation rule that
+        emptied it — and the linked case exists precisely because the
+        chain does not stop.
+    - phrase: the root of
+      instead: primary attributed driver
+      why: The same claim wearing a preposition.
+    - phrase: ai analysis shows
+      instead: name the method — the matched-control DiD, the changepoint test
+      why: >
+        Hides the method behind the tool. A reader can argue with a
+        difference-in-differences; nobody can argue with "AI analysis".
+    - phrase: ai-powered
+      instead: name the method
+      why: Describes the vendor, not the evidence.
+    - phrase: the model found
+      instead: name the method that produced the number
+      why: >
+        No model found any number in this system. Rule 1: every quantity
+        is computed by Python or SQL, and the model is handed the result.
+    - phrase: our algorithm determined
+      instead: name the method
+      why: Same evasion, longer.
+    - phrase: machine learning predicts
+      instead: name the method
+      why: >
+        Nothing here predicts. STL decomposes, PELT locates a changepoint,
+        DiD estimates an effect against a control group.
+    - phrase: definitely
+      instead: state the confidence the case published
+      why: A confidence of 0.84 is not a synonym for certainty.
+    - phrase: proves that
+      instead: is the best-supported explanation for
+      why: >
+        Observational data does not prove. It supports one explanation
+        better than the others it was tested against.
+
+  # Said in the prompt as well as checked afterwards. The check is what
+  # makes it true; the prompt is what makes the check cheap.
+  house_style:
+    - Attach an evidence id to every sentence. A sentence with nothing behind it is dropped.
+    - Use only numbers that appear in the object you were given.
+    - Name the method, never the tool.
+    - Say the share, never the whole.
+    - An unattributed residual is a finding. Report it; do not round it away.
