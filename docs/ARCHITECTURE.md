@@ -80,6 +80,34 @@ restated, just located.
 | Periods finance has reopened | table `restatement_register` |
 | Every disagreement the warehouse found and did not fix | table `data_gap_register` |
 | Every query that reached the warehouse | table `audit_log` |
+| The price list, the dollar-rupee rate and the volume assumption behind every cost figure | `semantic_layer/telemetry.yaml` |
+| How long each stage took, what it cost, and which methods ran | table `telemetry_request` |
+| Why the elapsed time on a case header is a measurement | `telemetry/recorder.py`, `case_registry.elapsed_ms` |
+| Why an offline run's cost says `cost_estimated` | `telemetry/cost.py::reported_usage` |
+| The only way a model call gets counted | `telemetry/recorder.py::MeteredProvider` |
+| The five stages composed into one run | `engine/verdict/pipeline.py::run_case` |
+| Where each of the eight triggers' fourteen facts comes from | `engine/verdict/triggers.py` |
+| How stage results become the frozen case contracts | `engine/verdict/casefile.py::assemble` |
+| Which calibration-ledger case type a hypothesis belongs to | `semantic_layer/causal_graph.yaml` → `case_type` |
+| The signed persona header, and what it does not prove | `api/auth.py` |
+| Why a finished case lives in the process rather than the warehouse | `api/store.py` |
+| The six SSE events and why the sixth is not a stage | `api/streaming.py` |
+| Turning a period label into the engine's four dates | `api/periods.py` |
+| What a reader may say, at which of three levels | `semantic_layer/learning.yaml` → `feedback` |
+| The only thing that writes `calibration_ledger`, `hypothesis_prior` or a realisation | `engine/learn/loop.py::apply` |
+| The Bayesian rule behind a learned prior, in one place | `semantic_layer/schema.py::PriorLearningSpec.posterior` |
+| Why a learned prior appears in a diff | `semantic_layer/runtime/priors.yaml`, written by `semantic_layer/overlay.py` |
+| Why a recovery curve is blended and not refitted | `engine/learn/curves.py` |
+| What D+14 and D+56 each measure, and why they are different rows | table `case_outcome`, `semantic_layer/learning.yaml` → `outcomes` |
+| Why what happened outranks what we were told | `engine/learn/loop.py::apply_outcome` |
+| Schema changes `CREATE TABLE IF NOT EXISTS` cannot make | `engine/warehouse/migrate.py` |
+| The executable series behind a KPI card, and why it is not `formula_sql` | `semantic_layer/series.yaml` |
+| Why two KPIs have no sparkline | `semantic_layer/series.yaml` → `transactions`, `conversion_rate` |
+| The Number Registry scenarios as complete case files | `engine/verdict/canonical.py` |
+| The one document the narrator receives | `engine/verdict/casefile.py::narrative_document` |
+| Why the browser never holds a token | `frontend/app/api/casefile/[...path]/route.ts` |
+| What each colour on screen means | `frontend/tailwind.config.ts`, `frontend/README.md` |
+| That every displayed number resolves to evidence | `tests/test_frontend_contract.py` |
 
 ## Constraints that shape the code
 
@@ -104,6 +132,21 @@ listed here only so you know they are architectural and not stylistic:
 - **no model call anywhere under `engine/confidence/` or `engine/abstain/`** — a confidence
   score is arithmetic and an abstention is a boolean; asserted by
   `tests/test_confidence.py::test_nothing_under_confidence_or_abstain_imports_the_model_layer`
+- **every learning update is bounded.** Priors are Bayesian against a declared strength and
+  capped in absolute shift; curves are blended against the sample they were fitted on; the
+  map refuses to fit below a minimum. A loop wired to a button can otherwise be moved by
+  whoever clicks most. Asserted by `tests/test_learn.py::test_the_shift_cap_binds` and
+  `::test_the_curve_shift_is_capped`
+- **`causal_graph.yaml` is never written to by the engine.** A learned prior lives in
+  `hypothesis_prior` and is materialised into `semantic_layer/runtime/priors.yaml`;
+  asserted by `tests/test_learn.py::test_the_declared_prior_is_never_written_to`
+- **a canonical case file is byte-reproducible.** Its evidence is minted with
+  `retrieved_at` pinned to the data timestamp, because the narrator's offline fixture is
+  keyed by a hash of the document — a wall clock on it loses the narrative on every
+  restart. Asserted by `tests/test_frontend_contract.py`
+- **no telemetry value is ever `Evidence`.** Latency, tokens and rupees describe the system;
+  evidence describes the business. Asserted by
+  `tests/test_telemetry.py::test_telemetry_never_produces_evidence`
 - **no cap fires on #2451.** CLAUDE.md warns that reading H2's unverifiability as a confounder
   of H1 produces 0.85 and is wrong; asserted by
   `tests/test_confidence.py::test_no_cap_fires_on_2451`
@@ -111,4 +154,12 @@ listed here only so you know they are architectural and not stylistic:
 ## Related
 
 - [`NUMBER_REGISTRY.md`](./NUMBER_REGISTRY.md) — pointer to the canonical values
+- **Known divergence, live pipeline vs. Number Registry.** Composed end to end at P15,
+  #2451 returns EXPLAINED rather than PARTIALLY EXPLAINED: ADJUDICATE eliminates
+  `competitor_action` on temporal precedence (cause onset 10 Nov, effect onset 7 Nov)
+  instead of leaving it live and unverifiable, so the verdict table's third condition
+  never engages. Test 2 also does not run on a live case — GATHER emits no affected
+  volume share or cause magnitude, so sufficiency reports "not tested, not eliminated".
+  Reported rather than adjusted (CLAUDE.md rule 10). See `engine/verdict/pipeline.py`
+  `_volume_shares` and `tests/test_api.py::test_the_pipeline_reaches_a_verdict`.
 - `DEMO_SCRIPT.md`, `REQUIREMENT_MATRIX.md` — listed in the repository layout, not yet written

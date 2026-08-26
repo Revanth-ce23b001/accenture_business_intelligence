@@ -69,6 +69,13 @@ class Score:
 
     #: Per required source, its age in hours. What trigger T8 reads.
     source_staleness_hours: dict = field(default_factory=dict)
+    #: The full per-source health behind s4, keyed by source name.
+    #:
+    #: Kept because "held, required, and came back empty" is a different
+    #: condition from "stale" and from "never bought", and the three are
+    #: read by three different triggers. Collapsing them to an age would
+    #: make a broken feed indistinguishable from a procurement decision.
+    sources: dict = field(default_factory=dict)
 
     def component(self, key: str) -> Component:
         for item in self.components:
@@ -162,6 +169,7 @@ def score_case(
             for name, health in sources.items()
             if health.held
         },
+        sources=dict(sources),
     )
 
 

@@ -1,0 +1,130 @@
+# SERIES — the sparkline behind each KPI card.
+#
+# WHY THIS IS NOT `formula_sql`. Every KPI contract carries a
+# `formula_sql`, and it is a DEFINITION: it names the columns finance
+# agreed on, against the conceptual model, and Gate 1 hashes it to detect
+# a definition change. It is not a query against the tables this warehouse
+# actually loaded — `fact_sales` in the definition is `fact_sales_daily`
+# here, `fact_footfall` is `fact_footfall_daily`. Running a definition as
+# a query would either fail or, worse, quietly compute something else.
+#
+# So the executable series is declared separately and says which table it
+# reads. When the warehouse and the conceptual model converge, this file
+# collapses into the contracts.
+#
+# TWO KPIS HAVE NO SERIES, AND THE FILE SAYS WHY RATHER THAN OMITTING
+# THEM. `transactions` needs a complete count of transactions and the
+# warehouse holds `fact_bill_lines` as a SAMPLE — it carries a
+# `sample_rate` column precisely because it is one. Counting distinct
+# bills there would understate the figure, and a sparkline that is
+# quietly wrong is worse than a card that says it has no series.
+# `conversion_rate` divides by that same count and inherits the gap.
+#
+# Every query below goes through `engine/db.py::execute_governed` like
+# any other read, so a regional manager's sparkline is their region's.
+
+version: 1
+
+# How many points a card shows. Not a threshold — the width of a
+# sparkline, and the only reason it is here rather than in the component
+# is that the query has to know how far back to reach.
+points: 18
+
+series:
+
+  net_revenue:
+    available: true
+    grain: monthly
+    unit: INR_CR
+    source_table: fact_sales_daily
+    description: >
+      Monthly net revenue by region, from the authoritative revenue
+      column. The same figure the KPI contract arbitrates to, divided by
+      a crore for display.
+    sql: |
+      SELECT
+          region,
+          strftime(txn_date, '%Y-%m')            AS period,
+          SUM(net_revenue_inr)                   AS value
+      FROM fact_sales_daily
+      GROUP BY 1, 2
+      ORDER BY 2
+
+  avg_selling_price:
+    available: true
+    grain: monthly
+    unit: INR
+    source_table: fact_sales_daily
+    description: >
+      Net revenue over units, by region and month. Moves with mix as well
+      as with price, which is exactly why the price hypothesis is tested
+      against the pricing log and never against this line.
+    sql: |
+      SELECT
+          region,
+          strftime(txn_date, '%Y-%m')                        AS period,
+          SUM(net_revenue_inr) / NULLIF(SUM(units), 0)       AS value
+      FROM fact_sales_daily
+      GROUP BY 1, 2
+      ORDER BY 2
+
+  on_shelf_availability:
+    available: true
+    grain: weekly
+    unit: pct
+    source_table: fact_inventory_snapshot
+    description: >
+      Share of ranged SKUs with stock on hand at the 12:00 snapshot, by
+      region and ISO week. The hour is named because choosing a different
+      one genuinely changes the answer.
+    sql: |
+      SELECT
+          d.region                                              AS region,
+          strftime(i.snapshot_date, '%Y-W%V')                   AS period,
+          100.0 * SUM(CASE WHEN i.on_hand_units > 0 THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(*), 0)                           AS value
+      FROM fact_inventory_snapshot AS i
+      JOIN dim_store AS d USING (store_id)
+      WHERE i.is_ranged
+        AND i.snapshot_hour_ist = 12
+      GROUP BY 1, 2
+      ORDER BY 2
+
+  qcomm_fulfilment_rate:
+    available: true
+    grain: weekly
+    unit: pct
+    source_table: fact_qcomm_weekly
+    description: >
+      Weekly fulfilment rate for the quick-commerce channel. Seven points
+      is the whole history — the channel launched seven weeks ago, which
+      is why this KPI cannot open a case.
+    sql: |
+      SELECT
+          scope                                  AS region,
+          strftime(week_start, '%Y-W%V')         AS period,
+          fulfilment_rate_pct                    AS value
+      FROM fact_qcomm_weekly
+      ORDER BY 2
+
+  transactions:
+    available: false
+    grain: monthly
+    unit: count
+    reason: >
+      The warehouse holds transaction detail as `fact_bill_lines`, which
+      is a SAMPLE — it carries a `sample_rate` column because it is one.
+      Counting distinct bills there would understate the figure by an
+      unknown factor. A card with no sparkline is better than a sparkline
+      that is quietly wrong.
+
+  conversion_rate:
+    available: false
+    grain: monthly
+    unit: pt
+    reason: >
+      Transactions over footfall. The denominator is in
+      `fact_footfall_daily` and is sound; the numerator is the sampled
+      transaction count above, so the ratio inherits the same gap. The
+      KPI itself is computed properly inside a case, where the sampling
+      is corrected for — this is about the sparkline only.

@@ -58,6 +58,9 @@ class Candidate:
     label: str
     description: str
     origin: str
+    #: The prior the screen actually sorts on. The DECLARED prior from
+    #: `causal_graph.yaml` until somebody has confirmed or rejected this
+    #: driver on this KPI, and the learned posterior after that.
     prior: float
     applicability: float
     prior_cases: int
@@ -65,11 +68,31 @@ class Candidate:
     required_sources: tuple[str, ...]
     missing_sources: tuple[str, ...]
     template: HypothesisTemplate | None = None
+    #: What the causal graph declares, kept beside the effective figure so
+    #: the screening panel can show a prior that has moved AS moved. A
+    #: learned prior that renders identically to a written-down one hides
+    #: the only visible evidence that the feedback loop is running.
+    declared_prior: float | None = None
+    prior_confirmed: int = 0
+    prior_rejected: int = 0
 
     @property
     def score(self) -> float:
         """prior x applicability. The screen sorts on this."""
         return self.prior * self.applicability
+
+    @property
+    def prior_moved(self) -> bool:
+        """Whether feedback has moved this prior off the declared one."""
+        return (
+            self.declared_prior is not None and self.prior != self.declared_prior
+        )
+
+    @property
+    def prior_shift(self) -> float:
+        if self.declared_prior is None:
+            return 0.0
+        return self.prior - self.declared_prior
 
     @property
     def verifiable(self) -> bool:
@@ -150,6 +173,23 @@ def prior_case_counts(
     return {str(row["tag"]): int(row["cases"]) for row in rows}
 
 
+def _learned_priors(connection, layer, kpi: str) -> dict:
+    """Effective priors for this KPI, or nothing if they cannot be read.
+
+    FAIL OPEN, TO THE CONTRACT. A warehouse that predates
+    `hypothesis_prior` — or a read that fails for any other reason —
+    leaves screening on the DECLARED priors, which is exactly what it did
+    before the loop existed. The alternative is a case that cannot be
+    opened because nobody has given feedback yet.
+    """
+    from engine.learn.priors import effective_priors
+
+    try:
+        return effective_priors(connection, kpi=kpi, layer=layer)
+    except Exception:  # noqa: BLE001 - the declared prior is a safe answer
+        return {}
+
+
 def screen(
     connection: duckdb.DuckDBPyConnection,
     user: User,
@@ -169,6 +209,12 @@ def screen(
     history = prior_case_counts(
         connection, user, layer, kpi=kpi, scope=scope, now=now
     )
+    # The feedback loop reaches the engine here, and only here. A driver
+    # readers keep rejecting on this KPI is screened lower next time; one
+    # they keep confirming is screened higher. Bounded by
+    # `learning.yaml -> priors`, so a hypothesis cannot be argued out of
+    # the slate by volume of clicks.
+    learned = _learned_priors(connection, layer, kpi)
 
     considered: list[Candidate] = []
     excluded: dict[str, str] = {}
@@ -184,19 +230,23 @@ def screen(
         cases = history.get(tag, 0)
         bonus = min(cases * spec.sources.case_history.bonus_per_case,
                     spec.sources.case_history.max_bonus)
+        effective = learned.get(tag)
         considered.append(
             Candidate(
                 tag=tag,
                 label=template.label,
                 description=template.description.strip(),
                 origin=ORIGIN_GRAPH,
-                prior=template.prior,
+                prior=effective.effective if effective else template.prior,
                 applicability=spec.applicability.base + bonus,
                 prior_cases=cases,
                 history_bonus=bonus,
                 required_sources=tuple(template.required_sources),
                 missing_sources=tuple(template.missing_sources()),
                 template=template,
+                declared_prior=template.prior,
+                prior_confirmed=effective.confirmed if effective else 0,
+                prior_rejected=effective.rejected if effective else 0,
             )
         )
 

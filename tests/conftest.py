@@ -272,7 +272,7 @@ def warehouse(tmp_path_factory):
     import shutil
 
     from engine.db import DEFAULT_DB_PATH, connect
-    from engine.warehouse.load import build_warehouse
+    from engine.warehouse.load import build_warehouse, create_schema
 
     if not DEFAULT_DB_PATH.exists():
         build_warehouse(DEFAULT_DB_PATH)
@@ -281,6 +281,12 @@ def warehouse(tmp_path_factory):
     shutil.copyfile(DEFAULT_DB_PATH, scratch)
 
     connection = connect(scratch)
+    # The cached file was built by whichever revision was current when it
+    # was first created. The DDL is CREATE TABLE IF NOT EXISTS, so running
+    # it again over the copy costs milliseconds and adds any table a later
+    # step introduced — without which a stale cache fails a test for a
+    # reason that has nothing to do with the code under test.
+    create_schema(connection)
     try:
         yield connection
     finally:

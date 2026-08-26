@@ -22,15 +22,18 @@ EXPECTED_DIRS = [
     "engine/qualify",
     "engine/gather",
     "engine/adjudicate",
+    "engine/verdict",
     "engine/contribution",
     "engine/confidence",
     "engine/abstain",
     "engine/recommend",
+    "engine/learn",
     "llm",
     "llm/fixtures",
     "security",
     "telemetry",
     "api",
+    "api/routes",
     "frontend",
     "tests",
     "docs",
@@ -44,6 +47,8 @@ EXPECTED_FILES = [
     "pyproject.toml",
     "engine/contracts.py",
     "llm/provider.py",
+    "api/main.py",
+    "api/app.py",
     "docs/ARCHITECTURE.md",
     "docs/NUMBER_REGISTRY.md",
 ]
@@ -60,11 +65,13 @@ def test_file_exists(relative):
 
 
 def test_engine_stage_packages_match_the_locked_stage_names():
-    """VALIDATE, QUALIFY, GATHER and ADJUDICATE have engine packages.
+    """All five locked stage names have engine packages.
 
-    VERDICT deliberately has none yet — see the note in docs/ARCHITECTURE.md.
-    CLAUDE.md calls the five stage names the module names, but the repository
-    layout in the same file lists no `verdict/` package. Flagged, not resolved.
+    CLAUDE.md §"Architecture" calls the five names the module names. Four
+    of them had packages from P5 to P14 and `verdict/` did not, which this
+    test recorded as flagged-not-resolved. P15 resolved it: the stages had
+    to be composed before the API could run one, and the composition is
+    engine work, not transport.
     """
-    for stage in ("validate", "qualify", "gather", "adjudicate"):
+    for stage in ("validate", "qualify", "gather", "adjudicate", "verdict"):
         assert (ROOT / "engine" / stage).is_dir()

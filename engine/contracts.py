@@ -35,7 +35,7 @@ No business logic lives here. Validators enforce structural invariants only.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -612,6 +612,122 @@ class TelemetryEvent(_Contract):
     detail: str | None = Field(default=None)
 
 
+class RequestTelemetry(_Contract):
+    """One request, rolled up. The unit the performance claims are made in.
+
+    `TelemetryEvent` above is the per-step detail; this is the row that
+    lands in `telemetry_request`, and it is what CLAUDE.md
+    §"Definition of done" is measured against — cost per case under INR 6,
+    P95 latency under 9 s warm.
+
+    Rule 1 does not apply to anything here, and it is worth saying why
+    rather than leaving it to be inferred: these are facts about the
+    SYSTEM, not about the business. No field on this model may ever be
+    wrapped as `Evidence` or rendered on an evidence panel. The model
+    never sees this object either — it is written after the fact.
+
+    `latency_by_stage` carries all five stages on every request, whether
+    or not each ran (`stages_entered` says which did). A request killed at
+    Gate 1 reports 0.0 ms for the four stages it never reached, and the
+    row is still complete.
+    """
+
+    request_id: str
+    case_id: str | None = Field(default=None)
+    user_id: str
+    persona: str
+    question: str | None = Field(default=None)
+
+    verdict: VerdictValue | None = Field(default=None)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    started_at: datetime
+    total_latency_ms: float = Field(ge=0.0)
+    latency_by_stage: dict[Stage, float]
+    stages_entered: tuple[Stage, ...] = Field(default=())
+    warm: bool = Field(
+        default=False,
+        description="False while the process is still paying its start-up costs",
+    )
+
+    analytical_methods_executed: tuple[str, ...] = Field(
+        default=(), description="Which statistical methods ran, in the order they ran"
+    )
+
+    llm_calls: int = Field(default=0, ge=0)
+    model_per_call: tuple[str, ...] = Field(
+        default=(), description="One model id per call, in call order"
+    )
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_input_tokens: int = Field(default=0, ge=0)
+    cache_creation_input_tokens: int = Field(default=0, ge=0)
+    estimated_cost_inr: float = Field(default=0.0, ge=0.0)
+    cost_estimated: bool = Field(
+        default=False,
+        description=(
+            "True when at least one call reported no usage and its tokens were "
+            "estimated from text — always the case on a replayed fixture"
+        ),
+    )
+
+    cache_hits: int = Field(default=0, ge=0)
+    cache_misses: int = Field(default=0, ge=0)
+
+    rows_scanned: int = Field(default=0, ge=0)
+    rows_filtered_by_policy: int = Field(default=0, ge=0)
+    rows_released_to_llm: int = Field(default=0, ge=0)
+
+    grounding_claims_checked: int = Field(default=0, ge=0)
+    grounding_claims_stripped: int = Field(default=0, ge=0)
+
+    #: Wall-clock from the case being opened to the verdict being reached.
+    #: Written back to `case_registry.elapsed_ms`. This is the measurement
+    #: that replaced the asserted "11 minutes" (resolved defect 6), so it
+    #: is None on a request that never opened a case rather than 0.0.
+    case_elapsed_ms: float | None = Field(default=None, ge=0.0)
+
+    mock: bool = Field(default=False, description="True when served by MockProvider")
+
+    @model_validator(mode="after")
+    def _row_is_complete(self) -> RequestTelemetry:
+        stages = get_args(Stage)
+        missing = [stage for stage in stages if stage not in self.latency_by_stage]
+        if missing:
+            raise ValueError(
+                f"latency_by_stage is missing {missing}; a telemetry row carries all "
+                f"{len(stages)} stage latencies, and a stage that did not run records 0.0"
+            )
+        # A key that is not a stage is already refused by the `Stage`
+        # literal on the dict and the tuple, so there is nothing to check
+        # for here: only a MISSING stage can get this far.
+
+        if len(self.model_per_call) != self.llm_calls:
+            raise ValueError(
+                f"{self.llm_calls} model calls but {len(self.model_per_call)} models "
+                "recorded; model_per_call carries one entry per call"
+            )
+
+        if self.grounding_claims_stripped > self.grounding_claims_checked:
+            raise ValueError(
+                f"{self.grounding_claims_stripped} claims stripped of "
+                f"{self.grounding_claims_checked} checked"
+            )
+
+        if self.rows_filtered_by_policy > self.rows_scanned:
+            raise ValueError(
+                f"the policy withheld {self.rows_filtered_by_policy} of "
+                f"{self.rows_scanned} rows evaluated"
+            )
+
+        return self
+
+    @property
+    def released_to_llm(self) -> bool:
+        """Whether any warehouse row crossed the trust boundary this request."""
+        return self.rows_released_to_llm > 0
+
+
 __all__ = [
     "Adjudication",
     "AdjudicationStatus",
@@ -629,6 +745,7 @@ __all__ = [
     "ProducedBy",
     "RecoveryConfidence",
     "Recommendation",
+    "RequestTelemetry",
     "Stage",
     "TelemetryEvent",
     "TestResult",

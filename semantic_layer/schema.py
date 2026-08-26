@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -265,6 +266,9 @@ class HypothesisTemplate(_Node):
     applicable_tests: list[str] = Field(min_length=1)
     confounders: list[str] = Field(default_factory=list)
     prior: float = Field(gt=0.0, lt=1.0)
+    #: Key into `calibration_ledger.case_type`. What trigger T7 asks the
+    #: organisation's track record about. Several hypotheses share one.
+    case_type: str = Field(min_length=1)
     calibration_note: str | None = None
 
     def missing_sources(self) -> list[str]:
@@ -640,6 +644,7 @@ class Units(_Node):
     days_per_week: int = Field(gt=0)
     days_per_year: float = Field(gt=0.0)
     seconds_per_hour: float = Field(gt=0.0)
+    milliseconds_per_second: float = Field(gt=0.0)
     minutes_per_hour: float = Field(gt=0.0)
     hours_per_day: float = Field(gt=0.0)
     months_per_year: int = Field(gt=0)
@@ -1793,6 +1798,319 @@ class NarrateConfig(_Node):
 
 
 # ---------------------------------------------------------------------------
+# Telemetry
+# ---------------------------------------------------------------------------
+
+
+class Currency(_Node):
+    """The one place dollars become rupees, with the date it was true."""
+
+    usd_to_inr: float = Field(gt=0.0)
+    as_of: date
+    source: str
+
+    def to_inr(self, usd: float) -> float:
+        return usd * self.usd_to_inr
+
+
+class ModelPrice(_Node):
+    """List price for one model, US dollars per million tokens."""
+
+    description: str
+    input_usd_per_mtok: float = Field(ge=0.0)
+    output_usd_per_mtok: float = Field(ge=0.0)
+    cache_read_usd_per_mtok: float = Field(ge=0.0)
+    cache_write_usd_per_mtok: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def _cache_rates_bracket_the_input_rate(self) -> ModelPrice:
+        """A cache read is cheaper than fresh input; a cache write is dearer.
+
+        Enforced because the whole argument for the content-hash cache in
+        `llm/classify.py` is that a hit costs less than a miss. A price
+        list that inverted this would make the cache read as a cost
+        increase and nobody would notice for a quarter.
+        """
+        if self.cache_read_usd_per_mtok > self.input_usd_per_mtok:
+            raise ValueError(
+                f"cache read ({self.cache_read_usd_per_mtok}) costs more than fresh "
+                f"input ({self.input_usd_per_mtok}); caching would be a loss"
+            )
+        if self.cache_write_usd_per_mtok < self.input_usd_per_mtok:
+            raise ValueError(
+                f"cache write ({self.cache_write_usd_per_mtok}) costs less than fresh "
+                f"input ({self.input_usd_per_mtok}); a write is input plus storage"
+            )
+        return self
+
+
+class EstimationSpec(_Node):
+    """How to guess a token count when the provider reported none.
+
+    Only ever used on a replayed fixture, and the row it produces is
+    flagged. See the note in telemetry.yaml.
+    """
+
+    chars_per_token: float = Field(gt=0.0)
+
+    def tokens_in(self, text: str | None) -> int:
+        if not text:
+            return 0
+        return max(1, round(len(text) / self.chars_per_token))
+
+
+class TelemetryTargets(_Node):
+    """CLAUDE.md §"Definition of done", as loadable values."""
+
+    cost_per_case_inr: float = Field(gt=0.0)
+    latency_budget_ms: float = Field(gt=0.0)
+    latency_percentile: float = Field(gt=0.0, lt=1.0)
+    #: How many requests at the start of a process count as cold. The
+    #: percentile is computed over the rest.
+    warmup_requests: int = Field(ge=0)
+
+
+class ProjectionSpec(_Node):
+    """Volume assumptions. The cost per interaction is measured, not here."""
+
+    interactions_per_week: int = Field(ge=1)
+    weeks_per_year: float = Field(gt=0.0)
+    months_per_year: int = Field(ge=1)
+
+
+class TelemetryConfig(_Node):
+    version: int = Field(ge=1)
+    currency: Currency
+    pricing: dict[str, ModelPrice] = Field(min_length=1)
+    estimation: EstimationSpec
+    targets: TelemetryTargets
+    projection: ProjectionSpec
+
+    def price(self, model: str) -> ModelPrice:
+        """The price list for `model`, or a refusal naming what is priced.
+
+        Deliberately not a `.get` returning None. An unpriced call costed
+        at zero is a budget that is wrong and silent about it.
+        """
+        try:
+            return self.pricing[model]
+        except KeyError:
+            raise SemanticLayerError(
+                f"no price for model {model!r}; telemetry.yaml prices "
+                f"{sorted(self.pricing)}. Add it there rather than defaulting to zero."
+            ) from None
+
+
+# ---------------------------------------------------------------------------
+# Learning — the feedback loop
+# ---------------------------------------------------------------------------
+
+
+class VerdictAction(_Node):
+    """One of the four verdict-level options."""
+
+    label: str
+    description: str
+    #: True is a hit, False a miss, None no judgement — and None writes no
+    #: calibration entry at all rather than an unscored row.
+    scores_as_correct: bool | None = None
+    requires_reason: bool = False
+
+
+class DriverAction(_Node):
+    label: str
+    description: str
+    confirms: bool
+
+
+class ActionAction(_Node):
+    label: str
+    description: str
+    accepted: bool
+
+
+class FeedbackSpec(_Node):
+    verdict_actions: dict[str, VerdictAction] = Field(min_length=1)
+    driver_actions: dict[str, DriverAction] = Field(min_length=1)
+    action_actions: dict[str, ActionAction] = Field(min_length=1)
+    reason_codes: dict[str, str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _a_reason_is_demanded_of_at_least_one_action(self) -> FeedbackSpec:
+        if not any(action.requires_reason for action in self.verdict_actions.values()):
+            raise ValueError(
+                "no verdict action requires a reason; 'reject with reason' is one of "
+                "the four options CLAUDE.md's loop depends on"
+            )
+        return self
+
+
+class OutcomeHorizon(_Node):
+    days: int = Field(gt=0)
+    name: str
+    measures: str
+    description: str
+
+
+class OutcomeSpec(_Node):
+    horizons: list[OutcomeHorizon] = Field(min_length=1)
+    unresolved_after_days: int = Field(gt=0)
+    recovered_at_share_of_low: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def _horizons_ascend_and_end_before_unresolved(self) -> OutcomeSpec:
+        days = [horizon.days for horizon in self.horizons]
+        if any(b <= a for a, b in zip(days, days[1:], strict=False)):
+            raise ValueError(f"outcome horizons must ascend: {days}")
+        if self.unresolved_after_days <= days[-1]:
+            raise ValueError(
+                f"a case is called unresolved at {self.unresolved_after_days} days, "
+                f"before its last horizon at {days[-1]}"
+            )
+        return self
+
+    def horizon(self, days: int) -> OutcomeHorizon:
+        for horizon in self.horizons:
+            if horizon.days == days:
+                return horizon
+        raise SemanticLayerError(
+            f"no outcome horizon at D+{days}; learning.yaml declares "
+            f"{[h.days for h in self.horizons]}"
+        )
+
+
+class PriorLearningSpec(_Node):
+    enabled: bool
+    strength: float = Field(gt=0.0)
+    min_observations: int = Field(ge=1)
+    max_absolute_shift: float = Field(gt=0.0, le=1.0)
+    floor: float = Field(gt=0.0, lt=1.0)
+    ceiling: float = Field(gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _the_band_is_a_band(self) -> PriorLearningSpec:
+        if self.floor >= self.ceiling:
+            raise ValueError(
+                f"prior floor {self.floor} is not below ceiling {self.ceiling}"
+            )
+        return self
+
+    def posterior(self, declared: float, confirmed: int, rejected: int) -> float:
+        """Beta posterior mean, bounded by the shift cap and the band.
+
+        The whole update rule, in one place, so the API, the tests, the
+        screening and the overlay writer cannot each have their own idea
+        of what a learned prior is.
+        """
+        observations = confirmed + rejected
+        if not self.enabled or observations < self.min_observations:
+            return declared
+        alpha = declared * self.strength + confirmed
+        total = self.strength + observations
+        moved = alpha / total
+        low = max(self.floor, declared - self.max_absolute_shift)
+        high = min(self.ceiling, declared + self.max_absolute_shift)
+        return min(max(moved, low), high)
+
+
+class Quantiles(_Node):
+    """What p25 and p75 mean. A definition, not a tunable."""
+
+    low: float = Field(gt=0.0, lt=1.0)
+    high: float = Field(gt=0.0, lt=1.0)
+
+    @model_validator(mode="after")
+    def _low_is_below_high(self) -> Quantiles:
+        if self.low >= self.high:
+            raise ValueError(f"low quantile {self.low} is not below high {self.high}")
+        return self
+
+
+class RecoveryLearningSpec(_Node):
+    enabled: bool
+    quantiles: Quantiles
+    min_realisations: int = Field(ge=1)
+    max_absolute_shift: float = Field(gt=0.0, le=1.0)
+    implausible_share_above: float = Field(gt=0.0)
+
+    def blend(
+        self, declared: float, declared_n: int, observed: float, observed_n: int
+    ) -> float:
+        """Weighted move towards what was observed.
+
+        Never a refit — see the note in learning.yaml on why the raw
+        realisations behind a seeded curve do not exist to refit against.
+        """
+        if not self.enabled or observed_n < self.min_realisations:
+            return declared
+        if declared_n + observed_n == 0:
+            return declared
+        moved = (declared_n * declared + observed_n * observed) / (
+            declared_n + observed_n
+        )
+        low = declared - self.max_absolute_shift
+        high = declared + self.max_absolute_shift
+        return min(max(moved, low), high)
+
+
+class CalibrationLearningSpec(_Node):
+    write_on_feedback: bool
+    outcome_supersedes_feedback: bool
+
+
+class LearningConfig(_Node):
+    version: int = Field(ge=1)
+    feedback: FeedbackSpec
+    outcomes: OutcomeSpec
+    priors: PriorLearningSpec
+    recovery: RecoveryLearningSpec
+    calibration: CalibrationLearningSpec
+
+
+# ---------------------------------------------------------------------------
+# Series — the sparkline behind a KPI card
+# ---------------------------------------------------------------------------
+
+
+class KpiSeries(_Node):
+    """One KPI's executable series, or the reason it has none.
+
+    Deliberately separate from the contract's `formula_sql`, which is a
+    DEFINITION against the conceptual model rather than a query against
+    the tables this warehouse loaded. See the note at the top of
+    series.yaml.
+    """
+
+    available: bool
+    grain: Grain
+    unit: str
+    description: str | None = None
+    source_table: str | None = None
+    sql: str | None = None
+    #: Required when `available` is false. A KPI with no series says why.
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _an_unavailable_series_explains_itself(self) -> KpiSeries:
+        if self.available and not (self.sql and self.source_table):
+            raise ValueError(
+                "a series declared available needs both a source_table and sql"
+            )
+        if not self.available and not self.reason:
+            raise ValueError(
+                "a KPI with no series must say why; an absence with no reason "
+                "reads as an oversight and gets 'fixed' with something wrong"
+            )
+        return self
+
+
+class SeriesConfig(_Node):
+    version: int = Field(ge=1)
+    points: int = Field(ge=2)
+    series: dict[str, KpiSeries] = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
 # The whole layer
 # ---------------------------------------------------------------------------
 
@@ -1812,6 +2130,9 @@ class SemanticLayer(_Node):
     adjudicate: AdjudicateConfig
     recommend: RecommendConfig
     narrate: NarrateConfig
+    telemetry: TelemetryConfig
+    learning: LearningConfig
+    series: SeriesConfig
 
     @model_validator(mode="after")
     def _cross_references_resolve(self) -> SemanticLayer:
@@ -1890,6 +2211,19 @@ class SemanticLayer(_Node):
                         f"in warehouse.yaml -> sources ({sorted(registry)}). Gate 1's "
                         "freshness check would have nowhere to look."
                     )
+
+        # Every KPI carries a series entry, even if only to say it has
+        # none. A KPI the watchlist cannot draw and cannot explain is a
+        # blank card nobody can account for.
+        missing_series = sorted(set(self.kpis) - set(self.series.series))
+        if missing_series:
+            raise ValueError(
+                f"series.yaml declares nothing for {missing_series}; a KPI with no "
+                "series must say so explicitly rather than by omission"
+            )
+        unknown_series = sorted(set(self.series.series) - set(self.kpis))
+        if unknown_series:
+            raise ValueError(f"series.yaml declares series for non-KPIs {unknown_series}")
 
         gate_id = self.validation.gate_id
         if gate_id not in self.adjudication.gates:
@@ -2239,6 +2573,9 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
     adjudicate_path = base / "adjudicate.yaml"
     recommend_path = base / "recommend.yaml"
     narrate_path = base / "narrate.yaml"
+    telemetry_path = base / "telemetry.yaml"
+    learning_path = base / "learning.yaml"
+    series_path = base / "series.yaml"
 
     layer_payload = {
         "kpis": kpis,
@@ -2257,6 +2594,11 @@ def load_semantic_layer(root: Path | str | None = None) -> SemanticLayer:
         ),
         "recommend": _build(RecommendConfig, _read_yaml(recommend_path), recommend_path),
         "narrate": _build(NarrateConfig, _read_yaml(narrate_path), narrate_path),
+        "telemetry": _build(
+            TelemetryConfig, _read_yaml(telemetry_path), telemetry_path
+        ),
+        "learning": _build(LearningConfig, _read_yaml(learning_path), learning_path),
+        "series": _build(SeriesConfig, _read_yaml(series_path), series_path),
     }
     try:
         return SemanticLayer.model_validate(layer_payload)
@@ -2281,10 +2623,12 @@ __all__ = [
     "AccessPolicy",
     "AdjudicateConfig",
     "AdjudicationConfig",
+    "ActionAction",
     "AttributionSpec",
     "BandGate",
     "BareCausalClaim",
     "Baseline",
+    "CalibrationLearningSpec",
     "CalendarGate",
     "CalendarMismatch",
     "CallDownSpec",
@@ -2296,18 +2640,22 @@ __all__ = [
     "CostModel",
     "CostSpec",
     "CostTypeSpec",
+    "Currency",
     "DataGapSpec",
     "DefinitionConflict",
     "DefinitionDriftCheck",
     "DidSpec",
+    "DriverAction",
     "DoseResponseSpec",
     "DriverOwner",
     "DriverOwnership",
     "EconomicsSpec",
     "EliminationSpec",
     "EntityKeyMismatch",
+    "EstimationSpec",
     "EvidenceVocabulary",
     "ExitCode",
+    "FeedbackSpec",
     "ForbiddenPhrase",
     "GatherConfig",
     "get_semantic_layer",
@@ -2316,7 +2664,9 @@ __all__ = [
     "GroundingSpec",
     "HypothesisTemplate",
     "KpiContract",
+    "KpiSeries",
     "LanguageSpec",
+    "LearningConfig",
     "LinkedCaseSpec",
     "load_semantic_layer",
     "load_timed",
@@ -2324,18 +2674,25 @@ __all__ = [
     "MatchingSpec",
     "Materiality",
     "MaterialityGate",
+    "ModelPrice",
     "NarrateConfig",
     "NotRecommendedSpec",
     "NumericGrounding",
+    "OutcomeHorizon",
+    "OutcomeSpec",
     "PersonaNarrative",
     "Playbook",
     "PrecedenceSpec",
+    "PriorLearningSpec",
+    "ProjectionSpec",
     "QualifyConfig",
+    "Quantiles",
     "RecommendConfig",
     "Reconciliation",
     "RecoveryConfidenceBand",
     "RecoveryCurve",
     "RecoveryCurves",
+    "RecoveryLearningSpec",
     "RecoverySpec",
     "ResolutionSpec",
     "RestatementCheck",
@@ -2344,6 +2701,7 @@ __all__ = [
     "RevenueDefinition",
     "RowCountDeltaCheck",
     "SemanticLayer",
+    "SeriesConfig",
     "SemanticLayerError",
     "Series",
     "Severity",
@@ -2354,9 +2712,12 @@ __all__ = [
     "SpecificitySpec",
     "StructuredTemplate",
     "SufficiencySpec",
+    "TelemetryConfig",
+    "TelemetryTargets",
     "Units",
     "UnobservedDepthSpec",
     "ValidateChecks",
+    "VerdictAction",
     "ValidateConfig",
     "WarehouseConfig",
 ]

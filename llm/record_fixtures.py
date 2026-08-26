@@ -357,7 +357,9 @@ def record_narratives(
     injected failures in tests/test_grounding.py, where the failure is the
     point.
     """
-    from llm.casefiles import CASE_IDS, frozen
+    from engine.verdict.canonical import build as build_canonical
+    from engine.verdict.casefile import narrative_document
+    from llm.casefiles import CASE_IDS
     from llm.narrate import build_request as build_narrative_request
     from llm.stand_in import synthesise_narrative
 
@@ -368,9 +370,20 @@ def record_narratives(
     fixtures_dir = Path(fixtures_dir) if fixtures_dir else FIXTURE_DIR
     provider = get_provider() if live else None
 
+    # THE DOCUMENT MUST BE THE ONE THE API SENDS. A fixture is keyed by a
+    # content hash of the request, so recording against a case file
+    # assembled differently from the one served produces fifteen fixtures
+    # that never match. The canonical builder is what the API seeds its
+    # store from, and `narrative_document` is what both hand the narrator.
+    connection, user = _warehouse()
+
     written: list[Path] = []
     for case_id in CASE_IDS:
-        adjudication = frozen(case_id, layer)
+        adjudication = narrative_document(
+            build_canonical(
+                case_id, connection=connection, user=user, layer=layer
+            ).case_file
+        )
         for persona in sorted(layer.narrate.personas):
             call = build_narrative_request(adjudication, persona, layer)
             written.append(
@@ -391,6 +404,32 @@ def record_narratives(
                 )
             )
     return written
+
+
+def _warehouse():
+    """A connection and a reader for the canonical build.
+
+    The recommendation half of a case file is priced against the
+    warehouse. Without one the case files come back without it, the
+    document differs from the one the API sends, and the fixtures miss —
+    so the recorder opens the warehouse rather than skipping it.
+    """
+    from engine.db import DEFAULT_DB_PATH, connect
+    from security.policy import User
+
+    if not DEFAULT_DB_PATH.exists():
+        raise SystemExit(
+            f"no warehouse at {DEFAULT_DB_PATH}. Run `make seed` first: the "
+            "narrative fixtures are keyed by a document that includes the "
+            "priced recommendation."
+        )
+    # Read-only, to match the connection  opened in the
+    # same process: DuckDB refuses a second handle to one file under a
+    # different configuration. Nothing here writes.
+    return (
+        connect(DEFAULT_DB_PATH, read_only=True),
+        User(user_id="system", persona="analyst"),
+    )
 
 
 class _ReplayOnly:

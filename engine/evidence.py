@@ -529,6 +529,41 @@ def persist(
     return len(rows)
 
 
+def from_row(row: Mapping[str, Any]) -> Evidence:
+    """Rebuild the contract from a stored row, lineage and all.
+
+    The inverse of `as_row`, and it lives here for the same reason
+    `as_row` does: the evidence engine owns what an evidence record IS,
+    and a second reconstruction elsewhere would be a second opinion about
+    it. `engine/db.py` does not know this shape and the API should not
+    have to.
+    """
+    lineage = json.loads(row["lineage_json"] or "[]")
+    assumptions = row["assumptions"] or ""
+    numeric, text = row["value_numeric"], row["value_text"]
+    return Evidence(
+        evidence_id=str(row["evidence_id"]),
+        kind=str(row["kind"]),
+        produced_by=str(row["produced_by"]),
+        label=str(row["label"]),
+        value=numeric if numeric is not None else text,
+        unit=str(row["unit"]) if row["unit"] is not None else None,
+        reliability=float(row["reliability"]),
+        source_system=str(row["source_system"]),
+        method=str(row["method"]),
+        source_ref=str(row["source_ref"]),
+        source_as_of=row["source_as_of"],
+        retrieved_at=row["retrieved_at"],
+        freshness_hours=float(row["freshness_hours"]),
+        completeness=float(row["completeness"]),
+        lineage=tuple(LineageStep.model_validate(step) for step in lineage),
+        assumptions=tuple(
+            part for part in assumptions.split(LIST_SEPARATOR) if part
+        ),
+        notes=str(row["notes"]) if row["notes"] is not None else None,
+    )
+
+
 def load(
     connection: duckdb.DuckDBPyConnection, case_id: str | None = None
 ) -> tuple[Mapping[str, Any], ...]:
@@ -556,6 +591,7 @@ __all__ = [
     "PromotionCheck",
     "ReliabilityProfile",
     "as_row",
+    "from_row",
     "can_promote_to_explained",
     "lineage_json",
     "load",

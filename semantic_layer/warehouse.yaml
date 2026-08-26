@@ -37,6 +37,7 @@ units:
   days_per_week: 7
   days_per_year: 365.25
   seconds_per_hour: 3600.0
+  milliseconds_per_second: 1000.0
   minutes_per_hour: 60.0
   hours_per_day: 24.0
   months_per_year: 12

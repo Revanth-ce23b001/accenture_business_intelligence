@@ -446,6 +446,25 @@ CREATE TABLE IF NOT EXISTS recommendation (
 );
 
 -- What the human did with the case. The input to recalibration.
+-- WHAT A READER SAID, AT ONE OF THREE LEVELS.
+--
+-- `target_kind` is which: 'verdict', 'driver' or 'action'. A reader can
+-- accept a verdict and reject one driver inside it, and a table that only
+-- recorded the verdict could not represent that — which matters, because
+-- the three levels update three different things:
+--
+--   verdict  -> the isotonic calibration map
+--   driver   -> the causal graph priors, per hypothesis per KPI
+--   action   -> the playbook recovery curves
+--
+-- `target_id` names the driver or the playbook; NULL at verdict level.
+-- `reason_code` is a closed set from learning.yaml, because free text is
+-- a comment and a comment cannot be counted. Both travel.
+--
+-- The verdict and confidence AS PUBLISHED are stamped on the row. The case
+-- can be re-run and reach a different answer; what the reader was looking
+-- at when they clicked cannot be reconstructed afterwards, and the
+-- calibration entry derived from this row depends on it.
 CREATE TABLE IF NOT EXISTS feedback_event (
     feedback_id  VARCHAR PRIMARY KEY,
     case_id      VARCHAR NOT NULL,
@@ -455,16 +474,94 @@ CREATE TABLE IF NOT EXISTS feedback_event (
     action       VARCHAR NOT NULL,
     comment      VARCHAR
 );
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS target_kind VARCHAR;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS target_id VARCHAR;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS reason_code VARCHAR;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS kpi VARCHAR;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS verdict_at_feedback VARCHAR;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS confidence_at_feedback DOUBLE;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS confidence_raw_at_feedback DOUBLE;
+ALTER TABLE feedback_event ADD COLUMN IF NOT EXISTS case_type VARCHAR;
 
+-- Bayesian counts behind every learned prior. One row per hypothesis per
+-- KPI, because "stock-outs are usually the answer" is a claim about a KPI
+-- and not about the business: stock-outs explain availability movements
+-- far more often than they explain average selling price, and one pooled
+-- count would blur the two into a number true of neither.
+--
+-- The counts are the state. The effective prior is DERIVED from them and
+-- the declared prior in causal_graph.yaml, by `learning.yaml -> priors`,
+-- and is never stored — a stored posterior is a number that goes stale
+-- the moment either input changes.
+CREATE TABLE IF NOT EXISTS hypothesis_prior (
+    kpi          VARCHAR NOT NULL,
+    hypothesis   VARCHAR NOT NULL,
+    confirmed    BIGINT  NOT NULL DEFAULT 0,
+    rejected     BIGINT  NOT NULL DEFAULT 0,
+    first_seen_at TIMESTAMP NOT NULL,
+    updated_at   TIMESTAMP NOT NULL,
+    PRIMARY KEY (kpi, hypothesis)
+);
+
+-- What an action actually recovered, against what was promised.
+--
+-- Both halves are kept. Comparing realised against expected needs the
+-- expectation as it was published, not as the curve would compute it
+-- today — a curve that has since moved would make every past case look
+-- better or worse than it was called at the time.
+CREATE TABLE IF NOT EXISTS recovery_realisation (
+    realisation_id     VARCHAR PRIMARY KEY,
+    case_id            VARCHAR NOT NULL,
+    playbook           VARCHAR NOT NULL,
+    curve_ref          VARCHAR NOT NULL,
+    attributable_inr   DOUBLE  NOT NULL,
+    expected_low_inr   DOUBLE  NOT NULL,
+    expected_high_inr  DOUBLE  NOT NULL,
+    realised_inr       DOUBLE  NOT NULL,
+    horizon_weeks      INTEGER NOT NULL,
+    -- realised / attributable. What the curve is quoted in, so an update
+    -- compares like with like.
+    realised_share     DOUBLE  NOT NULL,
+    -- True when the share is above `implausible_share_above`: recorded,
+    -- and excluded from any curve update. Recovering 300% of an attributed
+    -- loss means something else moved.
+    implausible        BOOLEAN NOT NULL DEFAULT FALSE,
+    recorded_at        TIMESTAMP NOT NULL
+);
+
+-- ONE ROW PER CASE PER HORIZON. D+14 asks whether the CAUSE held up;
+-- D+56 asks whether the MONEY came back. They are different questions
+-- with different answers — a cause can be right and the recovery still
+-- fail — so they are different rows and the key is (case_id, horizon_days).
+--
+-- `was_correct` here is what actually happened, and it supersedes the
+-- calibration entry the reader's feedback wrote. The two disagree
+-- sometimes: somebody accepts a case that later fails to recover. Both
+-- are kept, because "what we were told" and "what happened" are both
+-- worth knowing and only the second should calibrate anything.
+--
+-- Recreated by engine/warehouse/migrate.py on a warehouse that predates
+-- the composite key. Safe because the table never had a writer before
+-- P16 and is provably empty; the migration checks that and refuses if it
+-- is not.
 CREATE TABLE IF NOT EXISTS case_outcome (
-    case_id                 VARCHAR PRIMARY KEY,
+    case_id                 VARCHAR NOT NULL,
+    horizon_days            INTEGER NOT NULL,
+    horizon_name            VARCHAR NOT NULL,
     recorded_at             TIMESTAMP NOT NULL,
     action_taken            VARCHAR,
     outcome                 VARCHAR NOT NULL,
+    -- D+14's answer. NULL at a horizon that does not measure it.
+    cause_confirmed         BOOLEAN,
+    -- D+56's answer, and the money behind it.
+    recovered               BOOLEAN,
     realised_recovery_inr   DOUBLE,
+    expected_low_inr        DOUBLE,
+    expected_high_inr       DOUBLE,
     horizon_weeks           INTEGER,
     was_correct             BOOLEAN,
-    note                    VARCHAR
+    note                    VARCHAR,
+    PRIMARY KEY (case_id, horizon_days)
 );
 
 -- The closed cases the isotonic map is fitted on.
@@ -478,6 +575,82 @@ CREATE TABLE IF NOT EXISTS calibration_ledger (
     abstained             BOOLEAN NOT NULL,
     was_correct           BOOLEAN,
     notes                 VARCHAR
+);
+
+-- ONE ROW PER REQUEST. The unit of account.
+--
+-- `telemetry_event` below is the per-step detail — a stage boundary, a
+-- model call. This is the roll-up, and it is the table the two published
+-- performance claims are measured against: cost per case under INR 6,
+-- P95 latency under 9 s warm (CLAUDE.md §"Definition of done").
+--
+-- THE FIVE STAGE LATENCIES ARE NOT NULL BY DESIGN. "Every request writes
+-- a complete row with all five stage latencies" is the accept criterion,
+-- and a criterion the database enforces cannot be forgotten by a caller.
+-- A request killed at Gate 1 never enters ADJUDICATE; that stage records
+-- 0.0 ms and `stages_entered` names the ones that actually ran, so a
+-- zero is never ambiguous between "instant" and "never happened".
+--
+-- `elapsed_ms` here is the request. `case_registry.elapsed_ms` is the
+-- case open -> verdict measurement, written by the same recorder — that
+-- is the number the case header shows, and it is what replaced the
+-- asserted "11 minutes" (resolved defect 6).
+CREATE TABLE IF NOT EXISTS telemetry_request (
+    request_id                   VARCHAR PRIMARY KEY,
+    case_id                      VARCHAR,
+    user_id                      VARCHAR NOT NULL,
+    persona                      VARCHAR NOT NULL,
+    question                     VARCHAR,
+    verdict                      VARCHAR,
+    confidence                   DOUBLE,
+
+    started_at                   TIMESTAMP NOT NULL,
+    total_latency_ms             DOUBLE  NOT NULL,
+    latency_validate_ms          DOUBLE  NOT NULL,
+    latency_qualify_ms           DOUBLE  NOT NULL,
+    latency_gather_ms            DOUBLE  NOT NULL,
+    latency_adjudicate_ms        DOUBLE  NOT NULL,
+    latency_verdict_ms           DOUBLE  NOT NULL,
+    -- Which of the five were actually entered, in order, comma-separated.
+    stages_entered               VARCHAR NOT NULL,
+    -- False for the first requests of a process, which pay for loading the
+    -- semantic layer and opening the warehouse. The percentile is computed
+    -- over warm rows, and this column is why that is checkable rather than
+    -- a claim in a footnote.
+    warm                         BOOLEAN NOT NULL,
+
+    -- Which statistical methods ran, comma-separated. Not a count: the
+    -- point is WHICH, so a case that skipped the DiD is visible as such.
+    analytical_methods_executed  VARCHAR NOT NULL,
+
+    llm_calls                    INTEGER NOT NULL,
+    -- One model id per call, in call order, comma-separated. Proves the
+    -- routing in llm/provider.py did what it says.
+    model_per_call               VARCHAR NOT NULL,
+    input_tokens                 BIGINT  NOT NULL,
+    output_tokens                BIGINT  NOT NULL,
+    cache_read_input_tokens      BIGINT  NOT NULL,
+    cache_creation_input_tokens  BIGINT  NOT NULL,
+    estimated_cost_inr           DOUBLE  NOT NULL,
+    -- True when a call reported no usage and its tokens were estimated
+    -- from the text. Always true offline, always false on a live run. A
+    -- cost figure that does not say which it is cannot be defended.
+    cost_estimated               BOOLEAN NOT NULL,
+    -- Content-hash cache in `llm_cache`, not the prompt cache above.
+    cache_hits                   BIGINT  NOT NULL,
+    cache_misses                 BIGINT  NOT NULL,
+
+    -- Rows the policy evaluated, rows it withheld, rows that crossed the
+    -- trust boundary into a prompt. The third is the one an auditor asks
+    -- about; `audit_log` holds the same figure per statement.
+    rows_scanned                 BIGINT  NOT NULL,
+    rows_filtered_by_policy      BIGINT  NOT NULL,
+    rows_released_to_llm         BIGINT  NOT NULL,
+
+    grounding_claims_checked     INTEGER NOT NULL,
+    grounding_claims_stripped    INTEGER NOT NULL,
+
+    mock                         BOOLEAN NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS telemetry_event (

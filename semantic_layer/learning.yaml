@@ -1,0 +1,243 @@
+# LEARNING — what the system does with being told it was wrong.
+#
+# CLAUDE.md's loop ends: "human decides -> outcome logged -> recalibrate".
+# This file is the recalibrate half. Three things move, and they move for
+# three different reasons:
+#
+#   the isotonic map        was the CONFIDENCE honest?
+#   the causal graph priors was this DRIVER the usual answer here?
+#   the recovery curves     did the ACTION recover what we said it would?
+#
+# They are deliberately separate. A case whose driver was right and whose
+# recovery disappointed says something about the playbook and nothing
+# about the confidence; folding them into one score would lose that.
+#
+# THE HAZARD THIS FILE EXISTS TO BOUND. A learning loop wired directly to
+# a button is a learning loop that can be moved by whoever clicks most.
+# Every update here is bounded: priors are Bayesian against a declared
+# strength and capped in absolute shift, curves are blended against the
+# sample they were fitted on, and the calibration map refuses to fit below
+# a minimum. None of that makes the loop slow to learn something real; all
+# of it makes it slow to learn something loud.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# 1. FEEDBACK. What a reader is allowed to say, and at what level.
+#
+# Three levels, because a reader can agree with the verdict and disagree
+# with one driver inside it, and a system that only records "accept" or
+# "reject" cannot represent that. The levels update different things:
+# verdict feedback moves the calibration map, driver feedback moves the
+# priors, action feedback moves the recovery curves.
+# ---------------------------------------------------------------------------
+feedback:
+
+  # The four verdict-level options.
+  verdict_actions:
+
+    accept:
+      label: Accept
+      description: The verdict and its attribution are right as published.
+      # What this asserts about the published confidence, for the ledger.
+      # `true` is a hit, `false` a miss, `null` no judgement.
+      scores_as_correct: true
+      requires_reason: false
+
+    modify:
+      label: Modify
+      description: >
+        Broadly right, but the attribution as published needed changing.
+        Scored as a miss: the figure that went out was not the figure the
+        reader would have signed. A softer scoring would let the map
+        learn that "nearly right" is right, which is the one thing a
+        calibration map must not learn.
+      scores_as_correct: false
+      requires_reason: true
+
+    reject:
+      label: Reject with reason
+      description: The verdict is wrong. The reason is mandatory.
+      scores_as_correct: false
+      requires_reason: true
+
+    request_investigation:
+      label: Request investigation
+      description: >
+        Not a judgement on correctness — a request for more work. Writes
+        no calibration entry, deliberately: scoring it either way would
+        record an opinion the reader did not give.
+      scores_as_correct: null
+      requires_reason: false
+
+  # Per driver, inside a case. What moves the causal graph priors.
+  driver_actions:
+    confirm:
+      label: Confirm driver
+      description: This driver did cause the movement.
+      confirms: true
+    reject:
+      label: Reject driver
+      description: This driver did not cause the movement.
+      confirms: false
+
+  # Per recommended action. What opens a recovery realisation.
+  action_actions:
+    accept:
+      label: Accept action
+      description: The action will be taken. Its recovery becomes trackable.
+      accepted: true
+    reject:
+      label: Reject action
+      description: The action will not be taken. Nothing to realise.
+      accepted: false
+
+  # Reason codes on a rejection. A closed set: free text is a comment,
+  # and a comment cannot be counted. Both travel; only this is aggregated.
+  reason_codes:
+    wrong_driver: The cause named is not what happened.
+    wrong_magnitude: The right cause, the wrong size.
+    known_cause_missing: Something we already knew about is not in the slate.
+    data_wrong: The underlying figures do not match our own.
+    too_late: Correct, but it arrived after the decision was made.
+    not_actionable: Correct, and there is nothing we can do about it.
+
+# ---------------------------------------------------------------------------
+# 2. OUTCOMES. Two horizons, measuring two different things.
+#
+# D+14 asks whether the CAUSE held up — did the thing we blamed turn out
+# to be the thing? Fourteen days is roughly when the operational answer is
+# in and well before recovery could have landed.
+#
+# D+56 asks whether the MONEY came back. Eight weeks, which is the horizon
+# the recovery curves are quoted at, so realised and expected are
+# measured over the same window rather than compared across two.
+#
+# Both are recorded whether or not they are flattering. An outcome table
+# that only holds successes is a table that cannot calibrate anything.
+# ---------------------------------------------------------------------------
+outcomes:
+  horizons:
+    - days: 14
+      name: cause_check
+      measures: cause_confirmed
+      description: >
+        Did the driver we attributed to hold up once operations looked?
+        Answered from the driver-level feedback and the linked case, not
+        from whether revenue moved — a cause can be right and the recovery
+        still fail.
+    - days: 56
+      name: recovery_check
+      measures: recovered
+      description: >
+        Did the money come back, against the band we published? Fifty-six
+        days is eight weeks, which is `horizon_weeks` on every recovery
+        curve, so realised and expected span the same window.
+
+  # A case with no outcome by this many days past the last horizon is
+  # reported as unresolved rather than assumed. "Nobody came back to us"
+  # is not evidence that we were right.
+  unresolved_after_days: 90
+
+  # What counts as recovered, as a share of the published lower bound. A
+  # case that recovered 71% of the p25 estimate did not recover; one that
+  # made the p25 did. The bar is the LOW end of the band on purpose —
+  # missing the optimistic end is not a failed recovery.
+  recovered_at_share_of_low: 1.0
+
+# ---------------------------------------------------------------------------
+# 3. PRIORS. Bayesian, bounded, per hypothesis PER KPI.
+#
+# Per KPI because "stock-outs are usually the answer" is a statement about
+# a KPI, not about the business. Stock-outs explain availability movements
+# far more often than they explain average selling price, and one pooled
+# prior would blur the two into a number true of neither.
+#
+# The update is a Beta posterior mean:
+#
+#     effective = (declared x strength + confirmed) / (strength + confirmed + rejected)
+#
+# `strength` is how many observations the DECLARED prior is worth. At 20,
+# a single rejection moves a 0.18 prior to 0.171 — visible, and nowhere
+# near decisive, which is the correct weight for one person's opinion.
+# ---------------------------------------------------------------------------
+priors:
+  enabled: true
+
+  # Pseudo-observations behind the declared prior. Higher means the
+  # written-down graph wins for longer.
+  strength: 20.0
+
+  # Observations before the overlay is applied at all. One: the first
+  # rejection should be visible, because a loop whose first lesson is
+  # invisible is a loop nobody believes in. The strength above is what
+  # keeps it from being decisive.
+  min_observations: 1
+
+  # The furthest the learned prior may move from the declared one, in
+  # absolute probability. A hypothesis cannot be argued out of existence
+  # or into certainty by volume of clicks; past this the graph itself has
+  # to be edited, by a person, in review.
+  max_absolute_shift: 0.10
+
+  # Floor and ceiling on any effective prior. A prior of zero would remove
+  # a hypothesis from screening permanently, which is a decision for the
+  # causal graph and not for a feedback button.
+  floor: 0.01
+  ceiling: 0.95
+
+# ---------------------------------------------------------------------------
+# 4. RECOVERY CURVES. Realised against expected.
+#
+# A BLEND, NOT A REFIT, AND THE REASON MATTERS. A curve declares p25, p75
+# and the sample size it was fitted on — not the realisations themselves.
+# Those were never stored, so there is no data to refit a quantile
+# against. What can be done honestly is a weighted move towards what we
+# now observe, with the declared sample size as the weight:
+#
+#     updated = (n_declared x declared + n_observed x observed) / (n_declared + n_observed)
+#
+# When the raw realisations of the seeded cases exist, this becomes a real
+# refit and this note comes out.
+# ---------------------------------------------------------------------------
+recovery:
+  enabled: true
+
+  # What p25 and p75 MEAN. Not tunable knobs — they are the definition of
+  # the two numbers every recovery curve is quoted at, and they are here
+  # rather than in Python because rule 2 admits no numbers in engine/ at
+  # all, not even a definition.
+  quantiles:
+    low: 0.25
+    high: 0.75
+
+  # Realisations before a curve is touched at all. Three cases is a
+  # coincidence; below this the observations are recorded and the curve is
+  # left alone.
+  min_realisations: 3
+
+  # The furthest p25 or p75 may move per update, in absolute share.
+  max_absolute_shift: 0.15
+
+  # A realised share above this is recorded and excluded from the update:
+  # recovering 300% of an attributed loss means something else moved, and
+  # letting it pull the curve would teach the playbook a lie.
+  implausible_share_above: 1.5
+
+# ---------------------------------------------------------------------------
+# 5. CALIBRATION. When feedback reaches the map.
+#
+# Immediately. The map refits on every read of `/api/calibration`, so a
+# ledger row written by feedback is in the next fit. There is no batch
+# window and no overnight job, because a calibration you cannot see move
+# is a calibration nobody checks.
+# ---------------------------------------------------------------------------
+calibration:
+  # Write a ledger entry as soon as verdict feedback lands, rather than
+  # waiting for the D+56 outcome. The two disagree sometimes — a reader
+  # accepts a case that later fails to recover — and both are recorded:
+  # the feedback entry is what we were told, the outcome entry is what
+  # happened, and the second supersedes the first for the same case.
+  write_on_feedback: true
+  # An outcome record replaces the feedback-derived entry for its case.
+  outcome_supersedes_feedback: true

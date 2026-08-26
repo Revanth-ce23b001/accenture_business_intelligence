@@ -1,0 +1,135 @@
+# TELEMETRY — what a case actually cost, how long it actually took, and
+# what that arithmetic says about running the thing at scale.
+#
+# THIS FILE EXISTS BECAUSE OF RESOLVED DEFECT 6. The Round 1 material
+# asserted "11 minutes" as an illustration. Nothing measured it. Every
+# number the telemetry layer reports is now a measurement or the product
+# of a measurement and a rate, and the rates are here rather than in
+# Python (CLAUDE.md rule 2) — because a price list is a business input
+# that changes without the engine changing.
+#
+# Nothing in this file reaches a case. Token counts, latencies and rupee
+# costs are operational facts about the SYSTEM; a case's evidence is a
+# fact about the BUSINESS. `llm/provider.py` says the same thing in its
+# header, and the two must never be conflated: no value here is ever
+# wrapped as `Evidence` or shown on an evidence panel.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# 1. CURRENCY. One rate, dated, in one place.
+#
+# The model is billed in US dollars and the target is stated in rupees, so
+# exactly one conversion happens and it happens here. A rate with no date
+# is a rate nobody can audit, so the date is mandatory and the loader
+# requires it.
+#
+# Update it when finance updates it. Every historical row in
+# `telemetry_request` keeps the cost it was written with — costs are not
+# recomputed on read, because "what did this cost when we ran it" is the
+# question, and it has a fixed answer.
+# ---------------------------------------------------------------------------
+currency:
+  usd_to_inr: 88.0
+  as_of: 2026-01-01
+  source: >
+    Treasury's planning rate for FY26-27. A planning rate, not a spot
+    rate: the projection this feeds is an annual budget question, and a
+    budget built on a spot rate is a budget that moves every morning.
+
+# ---------------------------------------------------------------------------
+# 2. PRICING. Published list price, US dollars per million tokens.
+#
+# One entry per model the router can select. `llm/provider.py` routes
+# `classify` and `extract` to Haiku and the four generative tasks to
+# Sonnet; a model with no entry here cannot be priced, and the cost
+# accounting refuses rather than guessing — an unpriced call silently
+# costed at zero is how a budget goes wrong quietly.
+#
+# The four rates are the four things a request is billed for. Cache reads
+# are an order of magnitude cheaper than fresh input and cache writes are
+# dearer than it; the loader enforces that ordering, because a price list
+# that inverts it would make the caching in `llm/classify.py` look like a
+# cost increase.
+# ---------------------------------------------------------------------------
+pricing:
+
+  claude-haiku-4-5:
+    description: >
+      Batched document classification and typed-event extraction. The
+      high-volume half of the workload — roughly two thousand documents
+      per corpus sweep — and the reason the content-hash cache matters.
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+    cache_read_usd_per_mtok: 0.10
+    cache_write_usd_per_mtok: 1.25
+
+  claude-sonnet-5:
+    description: >
+      Hypothesis generation, narrative, clarification wording and action
+      phrasing. Two to four calls per case, so this is the low-volume,
+      high-value half.
+    input_usd_per_mtok: 2.00
+    output_usd_per_mtok: 10.00
+    cache_read_usd_per_mtok: 0.20
+    cache_write_usd_per_mtok: 2.50
+
+# ---------------------------------------------------------------------------
+# 2b. ESTIMATION. The fallback when the provider reported no usage.
+#
+# `MockProvider` replays recorded fixtures. A replay buys no tokens, so
+# the counts it returns are whatever was recorded — zero, for fixtures
+# written by hand rather than captured from a live call. An offline demo
+# that reported "this case cost INR 0.00" would be true about the replay
+# and useless about the system.
+#
+# So when a response carries no usage, the token counts are ESTIMATED
+# from the text, and the row records `cost_estimated = true`. A live run
+# uses the API's own counts and the flag is false. The two are never
+# added together silently: any read-back that mixes them says so.
+#
+# `chars_per_token` is coarse and is meant to be. It is an order-of-
+# magnitude check on the budget, not an accounting figure, and it is
+# never used when a real count exists.
+# ---------------------------------------------------------------------------
+estimation:
+  chars_per_token: 4.0
+
+# ---------------------------------------------------------------------------
+# 3. TARGETS. CLAUDE.md §"Definition of done", stated once, here.
+#
+# `cost_per_case_inr` and `latency_budget_ms` are the two published
+# performance claims. They are thresholds, so they live in YAML and the
+# test asserts against the loaded value rather than against a literal.
+#
+# WARM IS A MEASURED PROPERTY, NOT A DISCLAIMER. The first request in a
+# process pays for loading the semantic layer, opening DuckDB and reading
+# the fixture store. `warmup_requests` is how many requests are marked
+# cold; the latency percentile is computed over warm rows only, and the
+# row itself records which it was, so nobody has to take the word "warm"
+# on trust.
+# ---------------------------------------------------------------------------
+targets:
+  cost_per_case_inr: 6.0
+  latency_budget_ms: 9000.0
+  latency_percentile: 0.95
+  warmup_requests: 1
+
+# ---------------------------------------------------------------------------
+# 4. PROJECTION. The scale question, asked with real numbers.
+#
+# "What does this cost at ten thousand interactions a week" is the
+# question a buyer asks, and the only honest way to answer it is measured
+# cost per interaction times volume. The volume is a business assumption
+# and lives here; the cost per interaction is measured and comes from
+# `telemetry_request`. `telemetry/cost.py` multiplies them and does not
+# supply either.
+#
+# 52 weeks, and a month is a twelfth of a year rather than four weeks —
+# four-week months lose four weeks a year, which is an 8% understatement
+# on an annual budget.
+# ---------------------------------------------------------------------------
+projection:
+  interactions_per_week: 10000
+  weeks_per_year: 52
+  months_per_year: 12

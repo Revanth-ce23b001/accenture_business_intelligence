@@ -61,6 +61,14 @@ sources:
 # --------------------------------------------------------------------------
 hypotheses:
 
+  # `case_type` is the KEY INTO THE CALIBRATION LEDGER, and it is why
+  # trigger T7 can ask "what is our record on cases like this one".
+  # Several hypotheses share one — a stock-out and a transport disruption
+  # are both availability cases and the organisation's record on them is
+  # one record, not two. A type the ledger has never closed a case under
+  # is not an error: T7 reports no track record, which is a different
+  # statement from a poor one and the resolution panel acts on it
+  # differently.
   stock_out:
     label: Stock-out on ranged SKUs
     description: >
@@ -79,6 +87,7 @@ hypotheses:
     # sentence.
     confounders: [promo_lapse, weather, competitor_action, staffing_shortfall]
     prior: 0.18
+    case_type: availability_attribution
 
   price_increase:
     label: Price increase
@@ -92,6 +101,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [promo_lapse, mix_shift, competitor_action]
     prior: 0.10
+    case_type: pricing_attribution
 
   promo_lapse:
     label: Promotion lapsed or was not renewed
@@ -105,6 +115,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [price_increase, calendar_shift, mix_shift]
     prior: 0.08
+    case_type: promotion_attribution
 
   competitor_action:
     label: Competitor promotion or price action
@@ -131,6 +142,7 @@ hypotheses:
     # unresolved, and H5 is confounded as well as late.
     confounders: [calendar_shift, weather, footfall_decline, promo_lapse, stock_out]
     prior: 0.10
+    case_type: competitor_attribution
     calibration_note: "58% accurate on n=12 closed cases — below publication floor"
 
   staffing_shortfall:
@@ -144,6 +156,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [footfall_decline, calendar_shift, store_closure]
     prior: 0.06
+    case_type: staffing_attribution
 
   footfall_decline:
     label: Catchment footfall decline
@@ -163,6 +176,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [weather, competitor_action, calendar_shift, store_closure, transport_disruption]
     prior: 0.09
+    case_type: footfall_attribution
 
   mix_shift:
     label: Sales mix shift
@@ -176,6 +190,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [assortment_change, promo_lapse, stock_out]
     prior: 0.07
+    case_type: mix_attribution
 
   channel_cannibalisation:
     label: Channel cannibalisation
@@ -189,6 +204,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [assortment_change, price_increase, promo_lapse]
     prior: 0.05
+    case_type: mix_attribution
 
   weather:
     label: Adverse weather
@@ -202,6 +218,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [calendar_shift, transport_disruption, footfall_decline]
     prior: 0.06
+    case_type: footfall_attribution
 
   transport_disruption:
     label: Transport or replenishment disruption
@@ -215,6 +232,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [weather, stock_out]
     prior: 0.05
+    case_type: availability_attribution
 
   data_incident:
     label: Data incident
@@ -234,6 +252,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, specificity, confounder_screen]
     confounders: []
     prior: 0.07
+    case_type: data_incident
     calibration_note: "Normally resolved at Gate 1; reaching adjudication is itself a finding"
 
   calendar_shift:
@@ -252,6 +271,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, confounder_screen]
     confounders: [weather, promo_lapse]
     prior: 0.09
+    case_type: calendar_attribution
 
   store_closure:
     label: Store closure or trading interruption
@@ -265,6 +285,7 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [transport_disruption, weather]
     prior: 0.03
+    case_type: footfall_attribution
 
   assortment_change:
     label: Assortment change
@@ -278,3 +299,4 @@ hypotheses:
     applicable_tests: [precedence, sufficiency, dose_response, specificity, did, confounder_screen]
     confounders: [mix_shift, stock_out]
     prior: 0.07
+    case_type: availability_attribution

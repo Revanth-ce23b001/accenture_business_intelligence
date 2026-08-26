@@ -62,6 +62,7 @@ REQUIRED_TABLES = {
     "case_outcome",
     "calibration_ledger",
     "telemetry_event",
+    "telemetry_request",
     "audit_log",
     "data_gap_register",
     "kpi_definition_log",
@@ -98,6 +99,7 @@ EMPTY_AFTER_LOAD = {
     "case_outcome",
     "calibration_ledger",
     "telemetry_event",
+    "telemetry_request",
     "audit_log",
     "data_gap_register",
     # Written by engine/validate when Gate 1 first runs a KPI.

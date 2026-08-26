@@ -12,7 +12,7 @@ help:
 	@echo "make install — install the project and dev extras"
 	@echo "make generate — rebuild data/raw from the synthetic data generator"
 	@echo "make seed    — build the DuckDB warehouse from data/raw"
-	@echo "make demo    — run the full offline demo, MOCK_LLM=true (arrives at P8)"
+	@echo "make demo    — serve the API offline, MOCK_LLM=true, on 127.0.0.1:8000"
 	@echo "make test    — run the test suite"
 	@echo "make reset   — delete generated artefacts and caches"
 
@@ -29,8 +29,11 @@ generate:
 seed:
 	$(PY) -m engine.warehouse.load
 
+# The offline demo (CLAUDE.md rule 8): MOCK_LLM=true, no network, every
+# model call replayed from llm/fixtures/. One worker, because the case
+# store is process-local - see api/store.py.
 demo:
-	@$(PY) -c "import pathlib,subprocess,sys,os; p=pathlib.Path('api/main.py'); print('demo: not implemented yet - the demo path arrives at P8.') if not p.exists() else subprocess.check_call([sys.executable,'-m','api.main'],env={**os.environ,'MOCK_LLM':'true'})"
+	@$(PY) -c "import os,subprocess,sys; subprocess.check_call([sys.executable,'-m','api.main'], env={**os.environ,'MOCK_LLM':'true'})"
 
 test:
 	$(PYTEST)

@@ -61,8 +61,22 @@ class LoadReport:
 
 
 def create_schema(connection: duckdb.DuckDBPyConnection) -> None:
-    """Create every table. Idempotent — the DDL is CREATE TABLE IF NOT EXISTS."""
-    connection.execute(_read(SCHEMA_SQL))
+    """Create every table, then apply what the DDL cannot express.
+
+    Idempotent twice over: the DDL is CREATE TABLE IF NOT EXISTS, and
+    `engine/warehouse/migrate.py` skips a migration whose sentinel column
+    is already there. Running this over a warehouse built by any earlier
+    revision converges it on the current shape, which is why the test
+    fixtures call it on the copy they were handed.
+
+    A migration that would destroy rows raises rather than running. See
+    the note at the top of `migrate.py`.
+    """
+    from engine.warehouse.migrate import migrate
+
+    ddl = _read(SCHEMA_SQL)
+    connection.execute(ddl)
+    migrate(connection, ddl)
 
 
 def create_views(connection: duckdb.DuckDBPyConnection) -> None:
